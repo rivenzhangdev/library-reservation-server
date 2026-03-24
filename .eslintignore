@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+commitlint.config.js
+scripts/*.js
+tools/*.js
+database/*.js

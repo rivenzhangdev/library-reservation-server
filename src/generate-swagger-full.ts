@@ -1,0 +1,2224 @@
+/**
+ * 完整的 Swagger API 文档生成器（最终版）
+ * 包含所有接口的详细字段说明、数字错误码、多环境配置
+ */
+
+/* eslint-disable @typescript-eslint/no-require-imports */
+const fs = require('fs');
+const path = require('path');
+
+const swaggerDoc = {
+    openapi: '3.0.0',
+    info: {
+        title: '图书馆座位预约系统 API',
+        version: '1.0.0',
+        description: `
+# 📚 图书馆座位预约系统 - 完整 API 文档
+
+## 🎯 系统简介
+基于 Node.js + Koa.js + TypeScript 的图书馆座位预约系统后端服务，为微信小程序提供 RESTful API。
+
+## 🌐 多环境配置
+
+### 环境说明
+系统支持四套环境配置，通过不同的 \`.env\` 文件切换：
+
+| 环境 | 文件 | 端口 | MySQL 数据库 | MongoDB 数据库 | 用途 |
+|------|------|------|--------|------|------|
+| **开发环境** | \`.env.development\` | 3000 | library_booking_dev | library_booking_dev | 本地开发调试 |
+| **测试环境** | \`.env.test\` | 3001 | library_booking_test | library_booking_test | 功能测试、接口测试 |
+| **UAT 环境** | \`.env.uat\` | 3002 | library_booking_uat | library_booking_uat | 用户验收测试 |
+| **生产环境** | \`.env.production\` | 3003 | library_booking | library_booking | 线上生产 |
+
+### 切换环境方法
+
+#### 方法一：使用切换脚本（推荐）
+\`\`\`bash
+# 开发环境
+node switch-env.js development
+
+# 测试环境
+node switch-env.js test
+
+# UAT 环境
+node switch-env.js uat
+
+# 生产环境
+node switch-env.js production
+\`\`\`
+
+#### 方法二：手动复制配置文件
+\`\`\`bash
+# 开发环境
+cp .env.development .env
+
+# 测试环境
+cp .env.test .env
+
+# UAT 环境
+cp .env.uat .env
+
+# 生产环境
+cp .env.production .env
+\`\`\`
+
+### 环境隔离说明
+- ✅ **数据库隔离**: 每个环境使用独立的 MySQL 和 MongoDB 数据库
+- ✅ **端口隔离**: 每个环境使用不同的服务端口，可并行运行
+- ✅ **配置隔离**: JWT 密钥、微信 AppID 等配置独立
+- ⚠️ **注意事项**: 
+  - 初始化新环境时，需执行对应的 SQL 初始化脚本
+  - MongoDB 会在首次写入时自动创建数据库
+  - 切换环境后需重启开发服务器
+
+### 数据库初始化
+
+#### MySQL 数据库初始化
+\`\`\`bash
+# 开发环境
+mysql -u root -p < database/init-dev.sql
+
+# 测试环境
+mysql -u root -p < database/init-test.sql
+
+# UAT 环境
+mysql -u root -p < database/init-uat.sql
+
+# 生产环境
+mysql -u root -p < database/init-production.sql
+\`\`\`
+
+#### MongoDB 数据库初始化
+MongoDB 会在首次写入数据时自动创建数据库和集合。如需手动初始化（包含测试数据）：
+
+\`\`\`bash
+# 初始化所有环境的 MongoDB 数据库
+pnpm db:mongo:init
+
+# 或手动执行脚本
+node database/init-mongodb.js
+\`\`\`
+
+**初始化内容：**
+- ✅ **开发环境** (library_booking_dev): 包含测试用户、活动、通知等数据
+- ✅ **测试环境** (library_booking_test): 包含测试用户、活动、通知等数据
+- ✅ **UAT 环境** (library_booking_uat): 仅创建集合结构，无测试数据
+- ✅ **生产环境** (library_booking): 仅创建集合结构，无测试数据
+
+**初始化的集合：**
+- \`users\` - 用户信息
+- \`notifications\` - 通知消息
+- \`activities\` - 活动信息
+- \`creditrecords\` - 信用记录
+- \`feedbacks\` - 用户反馈
+
+**注意：** 如果 MongoDB 集合缺失，可以使用修复脚本：
+\`\`\`bash
+node database/fix-mongodb-collections.js
+\`\`\`
+
+## 🔐 认证说明
+
+### JWT Token 认证流程
+1. 调用 \`POST /api/auth/wxlogin\` 接口，传入微信登录 code
+2. 获取返回的 token
+3. 后续请求在 Header 中携带：\`Authorization: Bearer <token>\`
+
+### Token 有效期
+- **默认有效期**: 7 天
+- **过期处理**: 返回错误码 2005，需重新登录
+
+## 📋 响应格式
+
+### 成功响应
+\`\`\`json
+{
+  "success": true,
+  "data": { ... },
+  "message": "操作成功"
+}
+\`\`\`
+
+### 错误响应
+\`\`\`json
+{
+  "success": false,
+  "error": {
+    "code": 1001,  // 数字错误码
+    "message": "参数错误"
+  }
+}
+\`\`\`
+
+### 常见数字错误码
+
+**重要说明：** 所有错误均返回 HTTP 200 状态码，通过 \`code\` 字段区分具体错误类型。
+
+| 错误码 | 说明 | HTTP 状态 |
+|--------|------|----------|
+| 0 | 成功 | 200 |
+| 1001 | 参数错误 | 200 |
+| 1002 | 未授权 | 200 |
+| 1003 | 禁止访问 | 200 |
+| 1004 | 资源不存在 | 200 |
+| 1005 | 服务器内部错误 | 200 |
+| 2001 | 微信 code 无效 | 200 |
+| 2002 | 微信 API 错误 | 200 |
+| 2004 | Token 无效 | 200 |
+| 2005 | Token 过期 | 200 |
+| 2006 | 学号已被绑定 | 200 |
+| 3001 | 用户不存在 | 200 |
+| 4001 | 座位不存在 | 200 |
+| 5001 | 预约冲突 | 200 |
+| 5005 | 预约不存在 | 200 |
+
+**错误处理原则：**
+- ✅ HTTP 状态码始终为 200
+- ✅ 通过 \`success: false\` 标识请求失败
+- ✅ 通过 \`error.code\` 获取具体错误码（数字）
+- ✅ 通过 \`error.message\` 获取错误描述
+
+完整错误码定义见：\`src/utils/error-codes.ts\`
+
+## 🔢 枚举值规范
+
+服务端所有状态、类型字段均使用**数字类型**返回，前端需自行映射为文本。
+
+### 座位状态枚举
+| 值 | 含义 |
+|----|------|
+| 0 | 可用 |
+| 1 | 维修中 |
+
+### 座位类型枚举
+| 值 | 含义 |
+|----|------|
+| 0 | 单人间 |
+| 1 | 双人间 |
+| 2 | 多人间 |
+
+### 时间段枚举
+| 值 | 含义 |
+|----|------|
+| 0 | 上午 |
+| 1 | 下午 |
+| 2 | 晚上 |
+
+### 预约状态枚举
+| 值 | 含义 |
+|----|------|
+| 0 | 待使用 |
+| 1 | 进行中 |
+| 2 | 已完成 |
+| 3 | 已取消 |
+| 4 | 违约 |
+
+### 通知类型枚举
+| 值 | 含义 |
+|----|------|
+| 0 | 系统通知 |
+| 1 | 预约提醒 |
+| 2 | 签到提醒 |
+| 3 | 违约通知 |
+| 4 | 活动通知 |
+
+### 活动报名状态枚举
+| 值 | 含义 |
+|----|------|
+| 0 | 待审核 |
+| 1 | 已通过 |
+| 2 | 已拒绝 |
+| 3 | 已取消 |
+    `,
+    },
+    servers: [
+        {
+            url: 'http://localhost:3000',
+            description: '开发环境',
+        },
+        {
+            url: 'http://localhost:3001',
+            description: '测试环境',
+        },
+        {
+            url: 'http://localhost:3002',
+            description: 'UAT 环境',
+        },
+        {
+            url: 'http://localhost:3003',
+            description: '生产环境',
+        },
+    ],
+    tags: [
+        {
+            name: '🔐 认证授权 (Auth)',
+            description: '微信登录、学号绑定、Token 验证',
+        },
+        {
+            name: '👤 用户管理 (User)',
+            description: '个人信息、信用积分、收藏座位',
+        },
+        {
+            name: '💺 座位管理 (Seats)',
+            description: '楼层/座位查询、状态监控、搜索',
+        },
+        {
+            name: '📅 预约管理 (Booking)',
+            description: '创建预约、取消、签到、续约',
+        },
+        {
+            name: '🔔 通知系统 (Notification)',
+            description: '消息推送、已读标记、批量管理',
+        },
+        {
+            name: '🎉 活动管理 (Activity)',
+            description: '活动列表、详情查看、报名与取消',
+        },
+        {
+            name: '💬 反馈系统 (Feedback)',
+            description: '功能建议、问题上报、投诉建议',
+        },
+    ],
+    paths: {},
+    components: {
+        securitySchemes: {
+            bearerAuth: {
+                type: 'http',
+                scheme: 'bearer',
+                bearerFormat: 'JWT',
+                description: 'JWT Token 认证，格式：Bearer <token>',
+            },
+        },
+        schemas: {
+            // ==================== 通用响应 ====================
+            SuccessResponse: {
+                type: 'object',
+                properties: {
+                    success: {
+                        type: 'boolean',
+                        example: true,
+                        description: '请求是否成功',
+                    },
+                    data: { type: 'object', description: '响应数据主体' },
+                    message: {
+                        type: 'string',
+                        example: '操作成功',
+                        description: '成功提示',
+                    },
+                },
+                required: ['success', 'data'],
+            },
+            ErrorResponse: {
+                type: 'object',
+                properties: {
+                    success: { type: 'boolean', example: false },
+                    error: {
+                        type: 'object',
+                        properties: {
+                            code: {
+                                type: 'integer',
+                                example: 1001,
+                                description: '数字错误码',
+                            },
+                            message: { type: 'string', example: '错误描述' },
+                        },
+                    },
+                },
+                required: ['success', 'error'],
+            },
+
+            // ==================== 用户模型 ====================
+            User: {
+                type: 'object',
+                properties: {
+                    id: {
+                        type: 'string',
+                        format: 'objectId',
+                        description: '用户 ID',
+                    },
+                    nickName: { type: 'string', description: '用户昵称' },
+                    avatarUrl: {
+                        type: 'string',
+                        format: 'uri',
+                        description: '头像 URL',
+                    },
+                    studentId: {
+                        type: 'string',
+                        nullable: true,
+                        description: '学号（绑定后才有值）',
+                    },
+                    realName: {
+                        type: 'string',
+                        nullable: true,
+                        description: '真实姓名',
+                    },
+                    creditScore: {
+                        type: 'integer',
+                        minimum: 0,
+                        maximum: 100,
+                        description: '信用积分',
+                    },
+                    role: {
+                        type: 'string',
+                        enum: ['user', 'admin'],
+                        description: '用户角色',
+                    },
+                    isBindStudentId: {
+                        type: 'boolean',
+                        description: '是否已绑定学号',
+                    },
+                    favorites: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: '收藏座位 ID 列表',
+                    },
+                },
+            },
+
+            // ==================== 座位模型 ====================
+            Seat: {
+                type: 'object',
+                properties: {
+                    id: { type: 'integer', description: '座位 ID' },
+                    floorId: { type: 'integer', description: '楼层 ID' },
+                    row: { type: 'integer', description: '行号' },
+                    col: { type: 'integer', description: '列号' },
+                    type: {
+                        type: 'integer',
+                        enum: [0, 1, 2],
+                        description: '座位类型 (0:单人间，1:双人间，2:多人间)',
+                    },
+                    status: {
+                        type: 'integer',
+                        enum: [0, 1],
+                        description: '座位状态 (0:可用，1:维修中)',
+                    },
+                    hasSocket: { type: 'boolean', description: '是否有插座' },
+                    isWindow: { type: 'boolean', description: '是否靠窗' },
+                    zone: { type: 'string', description: '所属区域' },
+                    description: { type: 'string', description: '座位描述' },
+                },
+            },
+
+            // ==================== 预约模型 ====================
+            Booking: {
+                type: 'object',
+                properties: {
+                    id: { type: 'integer', description: '预约 ID' },
+                    userId: { type: 'string', description: '用户 ID' },
+                    seatId: { type: 'integer', description: '座位 ID' },
+                    date: {
+                        type: 'string',
+                        format: 'date',
+                        description: '预约日期',
+                    },
+                    timeSlot: {
+                        type: 'integer',
+                        enum: [0, 1, 2],
+                        description: '时间段 (0:上午，1:下午，2:晚上)',
+                    },
+                    startTime: {
+                        type: 'string',
+                        format: 'time',
+                        description: '开始时间',
+                    },
+                    endTime: {
+                        type: 'string',
+                        format: 'time',
+                        description: '结束时间',
+                    },
+                    status: {
+                        type: 'integer',
+                        enum: [0, 1, 2, 3, 4],
+                        description:
+                            '预约状态 (0:待使用，1:进行中，2:已完成，3:已取消，4:违约)',
+                    },
+                },
+            },
+
+            // ==================== 分页参数 ====================
+            PaginationRequest: {
+                type: 'object',
+                properties: {
+                    page: {
+                        type: 'integer',
+                        minimum: 1,
+                        default: 1,
+                        description: '页码',
+                    },
+                    limit: {
+                        type: 'integer',
+                        minimum: 1,
+                        maximum: 100,
+                        default: 20,
+                        description: '每页数量',
+                    },
+                },
+            },
+        },
+    },
+};
+
+console.log('正在生成完整的 Swagger API 文档（包含所有接口）...');
+
+// 添加所有路由路径
+const allPaths = {
+    // ==================== 认证授权 ====================
+    '/api/auth/wxlogin': {
+        post: {
+            tags: ['🔐 认证授权 (Auth)'],
+            summary: '微信小程序登录',
+            description: '使用微信 code 换取 JWT Token',
+            requestBody: {
+                required: true,
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            required: ['code'],
+                            properties: {
+                                code: {
+                                    type: 'string',
+                                    description: '【必填】微信登录 code',
+                                },
+                                userInfo: {
+                                    type: 'object',
+                                    description: '【可选】用户信息',
+                                    properties: {
+                                        avatarUrl: {
+                                            type: 'string',
+                                            format: 'uri',
+                                        },
+                                        nickName: { type: 'string' },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            responses: {
+                200: {
+                    description: '登录成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            token: {
+                                                type: 'string',
+                                                description: 'JWT Token',
+                                            },
+                                            userInfo: {
+                                                $ref: '#/components/schemas/User',
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                400: {
+                    description: '参数错误',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                $ref: '#/components/schemas/ErrorResponse',
+                            },
+                            examples: {
+                                '缺少 code': {
+                                    value: {
+                                        success: false,
+                                        error: {
+                                            code: 2001,
+                                            message: '缺少微信登录 code',
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    '/api/auth/bindStudentId': {
+        post: {
+            tags: ['🔐 认证授权 (Auth)'],
+            summary: '绑定学号',
+            security: [{ bearerAuth: [] }],
+            requestBody: {
+                required: true,
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            required: ['studentId', 'realName'],
+                            properties: {
+                                studentId: {
+                                    type: 'string',
+                                    description: '【必填】学号',
+                                },
+                                realName: {
+                                    type: 'string',
+                                    description: '【必填】真实姓名',
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            responses: {
+                200: { description: '绑定成功' },
+                400: { description: '参数错误' },
+                409: {
+                    description: '学号已被绑定',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                allOf: [
+                                    {
+                                        $ref: '#/components/schemas/ErrorResponse',
+                                    },
+                                ],
+                                properties: {
+                                    error: {
+                                        properties: {
+                                            code: {
+                                                type: 'integer',
+                                                example: 2006,
+                                            },
+                                            message: {
+                                                type: 'string',
+                                                example:
+                                                    '该学号已被其他用户绑定',
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    '/api/auth/check': {
+        get: {
+            tags: ['🔐 认证授权 (Auth)'],
+            summary: '检查登录状态',
+            security: [{ bearerAuth: [] }],
+            responses: {
+                200: {
+                    description: '已登录',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            isLogin: {
+                                                type: 'boolean',
+                                                example: true,
+                                            },
+                                            userInfo: {
+                                                $ref: '#/components/schemas/User',
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                401: { description: '未授权' },
+            },
+        },
+    },
+
+    // ==================== 用户管理 ====================
+    '/api/user/profile': {
+        get: {
+            tags: ['👤 用户管理 (User)'],
+            summary: '获取个人信息',
+            security: [{ bearerAuth: [] }],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: { $ref: '#/components/schemas/User' },
+                                },
+                            },
+                        },
+                    },
+                },
+                401: { description: '未授权' },
+                404: {
+                    description: '用户不存在',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                allOf: [
+                                    {
+                                        $ref: '#/components/schemas/ErrorResponse',
+                                    },
+                                ],
+                                properties: {
+                                    error: {
+                                        properties: {
+                                            code: {
+                                                type: 'integer',
+                                                example: 3001,
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        put: {
+            tags: ['👤 用户管理 (User)'],
+            summary: '更新个人信息',
+            security: [{ bearerAuth: [] }],
+            requestBody: {
+                required: false,
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            properties: {
+                                nickName: { type: 'string' },
+                                avatarUrl: { type: 'string', format: 'uri' },
+                                studentId: { type: 'string' },
+                                realName: { type: 'string' },
+                            },
+                        },
+                    },
+                },
+            },
+            responses: {
+                200: { description: '更新成功' },
+                400: { description: '参数错误' },
+            },
+        },
+    },
+    '/api/user/favorite/{seatId}': {
+        post: {
+            tags: ['👤 用户管理 (User)'],
+            summary: '收藏/取消收藏座位',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'seatId',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'string' },
+                    description: '座位 ID',
+                },
+            ],
+            responses: {
+                200: { description: '操作成功' },
+                401: { description: '未授权' },
+                404: {
+                    description: '座位不存在',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                allOf: [
+                                    {
+                                        $ref: '#/components/schemas/ErrorResponse',
+                                    },
+                                ],
+                                properties: {
+                                    error: {
+                                        properties: {
+                                            code: {
+                                                type: 'integer',
+                                                example: 4001,
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    '/api/user/credit': {
+        get: {
+            tags: ['👤 用户管理 (User)'],
+            summary: '获取信用积分',
+            security: [{ bearerAuth: [] }],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            creditScore: {
+                                                type: 'integer',
+                                                example: 100,
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                401: { description: '未授权' },
+            },
+        },
+    },
+    '/api/user/credit/records': {
+        get: {
+            tags: ['👤 用户管理 (User)'],
+            summary: '获取信用记录',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'page',
+                    in: 'query',
+                    schema: { type: 'integer', default: 1 },
+                    description: '页码',
+                },
+                {
+                    name: 'limit',
+                    in: 'query',
+                    schema: { type: 'integer', default: 20 },
+                    description: '每页数量',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            list: {
+                                                type: 'array',
+                                                items: {
+                                                    type: 'object',
+                                                    properties: {
+                                                        id: { type: 'string' },
+                                                        userId: {
+                                                            type: 'string',
+                                                        },
+                                                        changeAmount: {
+                                                            type: 'integer',
+                                                        },
+                                                        reason: {
+                                                            type: 'string',
+                                                        },
+                                                        createdAt: {
+                                                            type: 'string',
+                                                            format: 'date-time',
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                            total: { type: 'integer' },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                401: { description: '未授权' },
+            },
+        },
+    },
+
+    // ==================== 座位管理 ====================
+    '/api/seats/floors': {
+        get: {
+            tags: ['💺 座位管理 (Seats)'],
+            summary: '获取楼层列表',
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'array',
+                                        items: {
+                                            type: 'object',
+                                            properties: {
+                                                id: {
+                                                    type: 'integer',
+                                                    example: 1,
+                                                },
+                                                name: {
+                                                    type: 'string',
+                                                    example: '一楼',
+                                                },
+                                                description: {
+                                                    type: 'string',
+                                                    example: '主阅览室',
+                                                },
+                                                totalSeats: {
+                                                    type: 'integer',
+                                                    example: 100,
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    '/api/seats/floor/{floorId}': {
+        get: {
+            tags: ['💺 座位管理 (Seats)'],
+            summary: '获取楼层的座位列表',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'floorId',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'integer' },
+                    description: '楼层 ID',
+                },
+                {
+                    name: 'date',
+                    in: 'query',
+                    required: false,
+                    schema: { type: 'string', format: 'date' },
+                    description: '查询日期（可选）',
+                },
+                {
+                    name: 'timeSlot',
+                    in: 'query',
+                    required: false,
+                    schema: { type: 'integer', enum: [0, 1, 2] },
+                    description: '时间段（可选）',
+                },
+                {
+                    name: 'filters',
+                    in: 'query',
+                    required: false,
+                    schema: { type: 'string' },
+                    description: '筛选条件 JSON 字符串（可选）',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            floorId: { type: 'integer' },
+                                            floorName: { type: 'string' },
+                                            seats: {
+                                                type: 'array',
+                                                items: {
+                                                    $ref: '#/components/schemas/Seat',
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                404: {
+                    description: '楼层不存在',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                allOf: [
+                                    {
+                                        $ref: '#/components/schemas/ErrorResponse',
+                                    },
+                                ],
+                                properties: {
+                                    error: {
+                                        properties: {
+                                            code: {
+                                                type: 'integer',
+                                                example: 4002,
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    '/api/seats/search': {
+        get: {
+            tags: ['💺 座位管理 (Seats)'],
+            summary: '搜索座位',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'keyword',
+                    in: 'query',
+                    required: true,
+                    schema: { type: 'string' },
+                    description: '搜索关键词',
+                },
+                {
+                    name: 'date',
+                    in: 'query',
+                    required: false,
+                    schema: { type: 'string', format: 'date' },
+                    description: '查询日期（可选）',
+                },
+                {
+                    name: 'timeSlot',
+                    in: 'query',
+                    required: false,
+                    schema: { type: 'integer', enum: [0, 1, 2] },
+                    description: '时间段（可选）',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '搜索成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'array',
+                                        items: {
+                                            allOf: [
+                                                {
+                                                    $ref: '#/components/schemas/Seat',
+                                                },
+                                            ],
+                                            properties: {
+                                                floorName: { type: 'string' },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                400: {
+                    description: '参数错误',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                $ref: '#/components/schemas/ErrorResponse',
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    '/api/seats/{id}': {
+        get: {
+            tags: ['-seat 座位管理 (Seats)'],
+            summary: '获取座位详情',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'integer' },
+                    description: '座位 ID',
+                },
+                {
+                    name: 'date',
+                    in: 'query',
+                    required: false,
+                    schema: { type: 'string', format: 'date' },
+                    description: '查询日期（可选）',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        allOf: [
+                                            {
+                                                $ref: '#/components/schemas/Seat',
+                                            },
+                                        ],
+                                        properties: {
+                                            floorName: { type: 'string' },
+                                            timeSlotStatus: {
+                                                type: 'object',
+                                                properties: {
+                                                    morning: { type: 'string' },
+                                                    afternoon: {
+                                                        type: 'string',
+                                                    },
+                                                    evening: { type: 'string' },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                404: {
+                    description: '座位不存在',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                $ref: '#/components/schemas/ErrorResponse',
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+
+    // ==================== 预约管理 ====================
+    '/api/booking': {
+        post: {
+            tags: ['📅 预约管理 (Booking)'],
+            summary: '创建预约',
+            security: [{ bearerAuth: [] }],
+            requestBody: {
+                required: true,
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            required: ['seatId', 'date', 'timeSlot'],
+                            properties: {
+                                seatId: {
+                                    type: 'integer',
+                                    description: '【必填】座位 ID',
+                                },
+                                date: {
+                                    type: 'string',
+                                    format: 'date',
+                                    description: '【必填】预约日期',
+                                },
+                                timeSlot: {
+                                    type: 'integer',
+                                    enum: [0, 1, 2],
+                                    description:
+                                        '【必填】时间段 (0:上午，1:下午，2:晚上)',
+                                },
+                                startTime: {
+                                    type: 'string',
+                                    format: 'time',
+                                    description: '【可选】开始时间',
+                                },
+                                endTime: {
+                                    type: 'string',
+                                    format: 'time',
+                                    description: '【可选】结束时间',
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            responses: {
+                200: {
+                    description: '创建成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            id: {
+                                                type: 'integer',
+                                                description: '预约 ID',
+                                            },
+                                            seatId: { type: 'integer' },
+                                            date: {
+                                                type: 'string',
+                                                format: 'date',
+                                            },
+                                            timeSlot: { type: 'integer' },
+                                            status: {
+                                                type: 'integer',
+                                                enum: [0, 1, 2, 3, 4],
+                                                description: '预约状态',
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                400: { description: '参数错误' },
+                404: { description: '座位不存在' },
+                409: { description: '预约冲突' },
+            },
+        },
+    },
+    '/api/booking/my': {
+        get: {
+            tags: ['📅 预约管理 (Booking)'],
+            summary: '获取我的预约列表',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'status',
+                    in: 'query',
+                    schema: { type: 'integer', enum: [0, 1, 2, 3, 4] },
+                    description: '预约状态筛选（可选）',
+                },
+                {
+                    name: 'page',
+                    in: 'query',
+                    schema: { type: 'integer', default: 1 },
+                    description: '页码',
+                },
+                {
+                    name: 'limit',
+                    in: 'query',
+                    schema: { type: 'integer', default: 20 },
+                    description: '每页数量',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            bookings: {
+                                                type: 'array',
+                                                items: {
+                                                    type: 'object',
+                                                    properties: {
+                                                        id: { type: 'integer' },
+                                                        seatId: {
+                                                            type: 'integer',
+                                                        },
+                                                        floorName: {
+                                                            type: 'string',
+                                                            description:
+                                                                '楼层名称',
+                                                        },
+                                                        rowNum: {
+                                                            type: 'integer',
+                                                            description: '排号',
+                                                        },
+                                                        colNum: {
+                                                            type: 'integer',
+                                                            description: '列号',
+                                                        },
+                                                        zone: {
+                                                            type: 'string',
+                                                            description: '区域',
+                                                        },
+                                                        type: {
+                                                            type: 'string',
+                                                            description:
+                                                                '座位类型',
+                                                        },
+                                                        date: {
+                                                            type: 'string',
+                                                            format: 'date',
+                                                        },
+                                                        timeSlot: {
+                                                            type: 'integer',
+                                                        },
+                                                        startTime: {
+                                                            type: 'string',
+                                                            format: 'date-time',
+                                                        },
+                                                        endTime: {
+                                                            type: 'string',
+                                                            format: 'date-time',
+                                                        },
+                                                        status: {
+                                                            type: 'integer',
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                            total: { type: 'integer' },
+                                            page: { type: 'integer' },
+                                            limit: { type: 'integer' },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                401: { description: '未授权' },
+            },
+        },
+    },
+    '/api/booking/{id}': {
+        get: {
+            tags: ['📅 预约管理 (Booking)'],
+            summary: '获取预约详情',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'integer' },
+                    description: '预约 ID',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            id: { type: 'integer' },
+                                            seatId: { type: 'integer' },
+                                            floorName: {
+                                                type: 'string',
+                                                description: '楼层名称',
+                                            },
+                                            rowNum: {
+                                                type: 'integer',
+                                                description: '排号',
+                                            },
+                                            colNum: {
+                                                type: 'integer',
+                                                description: '列号',
+                                            },
+                                            zone: {
+                                                type: 'string',
+                                                description: '区域',
+                                            },
+                                            type: {
+                                                type: 'string',
+                                                description: '座位类型',
+                                            },
+                                            date: {
+                                                type: 'string',
+                                                format: 'date',
+                                            },
+                                            timeSlot: { type: 'integer' },
+                                            startTime: {
+                                                type: 'string',
+                                                format: 'date-time',
+                                            },
+                                            endTime: {
+                                                type: 'string',
+                                                format: 'date-time',
+                                            },
+                                            status: { type: 'integer' },
+                                            createdAt: {
+                                                type: 'string',
+                                                format: 'date-time',
+                                            },
+                                            updatedAt: {
+                                                type: 'string',
+                                                format: 'date-time',
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                404: { description: '预约不存在' },
+            },
+        },
+        delete: {
+            tags: ['📅 预约管理 (Booking)'],
+            summary: '取消预约',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'integer' },
+                    description: '预约 ID',
+                },
+            ],
+            responses: {
+                200: { description: '取消成功' },
+                404: { description: '预约不存在' },
+            },
+        },
+    },
+    '/api/booking/checkin/{id}': {
+        post: {
+            tags: ['📅 预约管理 (Booking)'],
+            summary: '预约签到',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'integer' },
+                    description: '预约 ID',
+                },
+            ],
+            requestBody: {
+                required: false,
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            properties: {
+                                location: {
+                                    type: 'object',
+                                    description: '位置信息（可选）',
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            responses: {
+                200: { description: '签到成功' },
+                404: { description: '预约不存在' },
+            },
+        },
+    },
+    '/api/booking/renew/{id}': {
+        post: {
+            tags: ['📅 预约管理 (Booking)'],
+            summary: '预约续约',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'integer' },
+                    description: '预约 ID',
+                },
+            ],
+            requestBody: {
+                required: true,
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            required: ['timeSlot'],
+                            properties: {
+                                timeSlot: {
+                                    type: 'integer',
+                                    enum: [0, 1, 2],
+                                    description: '【必填】时间段',
+                                },
+                                location: {
+                                    type: 'object',
+                                    description: '位置信息（可选）',
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            responses: {
+                200: { description: '续约成功' },
+                404: { description: '预约不存在' },
+            },
+        },
+    },
+
+    // ==================== 通知系统 ====================
+    '/api/notification': {
+        get: {
+            tags: ['🔔 通知系统 (Notification)'],
+            summary: '获取通知列表',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'type',
+                    in: 'query',
+                    schema: { type: 'integer', enum: [0, 1, 2, 3, 4] },
+                    description: '通知类型筛选（可选）',
+                },
+                {
+                    name: 'isRead',
+                    in: 'query',
+                    schema: { type: 'boolean' },
+                    description: '是否已读（可选）',
+                },
+                {
+                    name: 'page',
+                    in: 'query',
+                    schema: { type: 'integer', default: 1 },
+                    description: '页码',
+                },
+                {
+                    name: 'limit',
+                    in: 'query',
+                    schema: { type: 'integer', default: 20 },
+                    description: '每页数量',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            notifications: {
+                                                type: 'array',
+                                                items: {
+                                                    type: 'object',
+                                                    properties: {
+                                                        id: { type: 'string' },
+                                                        title: {
+                                                            type: 'string',
+                                                        },
+                                                        content: {
+                                                            type: 'string',
+                                                        },
+                                                        type: {
+                                                            type: 'integer',
+                                                            enum: [
+                                                                0, 1, 2, 3, 4,
+                                                            ],
+                                                            description:
+                                                                '通知类型',
+                                                        },
+                                                        time: {
+                                                            type: 'string',
+                                                            format: 'date-time',
+                                                        },
+                                                        isRead: {
+                                                            type: 'boolean',
+                                                        },
+                                                        relatedId: {
+                                                            type: 'string',
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                            total: { type: 'integer' },
+                                            page: { type: 'integer' },
+                                            limit: { type: 'integer' },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                401: { description: '未授权' },
+            },
+        },
+    },
+    '/api/notification/{id}/read': {
+        post: {
+            tags: ['🔔 通知系统 (Notification)'],
+            summary: '标记通知已读',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'string' },
+                    description: '通知 ID',
+                },
+            ],
+            responses: {
+                200: { description: '标记成功' },
+                404: { description: '通知不存在' },
+            },
+        },
+    },
+    '/api/notification/read-all': {
+        post: {
+            tags: ['🔔 通知系统 (Notification)'],
+            summary: '批量标记已读',
+            security: [{ bearerAuth: [] }],
+            responses: {
+                200: { description: '标记成功' },
+                401: { description: '未授权' },
+            },
+        },
+    },
+    '/api/notification/{id}': {
+        delete: {
+            tags: ['🔔 通知系统 (Notification)'],
+            summary: '删除通知',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'string' },
+                    description: '通知 ID',
+                },
+            ],
+            responses: {
+                200: { description: '删除成功' },
+                404: { description: '通知不存在' },
+            },
+        },
+    },
+
+    // ==================== 活动管理 ====================
+    '/api/activity': {
+        get: {
+            tags: ['🎉 活动管理 (Activity)'],
+            summary: '获取活动列表',
+            parameters: [
+                {
+                    name: 'status',
+                    in: 'query',
+                    schema: { type: 'integer', enum: [0, 1, 2] },
+                    description: '活动状态筛选（可选）',
+                },
+                {
+                    name: 'page',
+                    in: 'query',
+                    schema: { type: 'integer', default: 1 },
+                    description: '页码',
+                },
+                {
+                    name: 'limit',
+                    in: 'query',
+                    schema: { type: 'integer', default: 20 },
+                    description: '每页数量',
+                },
+                {
+                    name: 'myActivities',
+                    in: 'query',
+                    schema: { type: 'boolean' },
+                    description: '是否只查看我报名的活动（可选）',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            activities: {
+                                                type: 'array',
+                                                items: {
+                                                    type: 'object',
+                                                    properties: {
+                                                        id: { type: 'string' },
+                                                        title: {
+                                                            type: 'string',
+                                                        },
+                                                        description: {
+                                                            type: 'string',
+                                                        },
+                                                        coverImage: {
+                                                            type: 'string',
+                                                            format: 'uri',
+                                                        },
+                                                        startTime: {
+                                                            type: 'string',
+                                                            format: 'date-time',
+                                                        },
+                                                        endTime: {
+                                                            type: 'string',
+                                                            format: 'date-time',
+                                                        },
+                                                        location: {
+                                                            type: 'string',
+                                                        },
+                                                        status: {
+                                                            type: 'integer',
+                                                            enum: [0, 1, 2],
+                                                            description:
+                                                                '活动状态',
+                                                        },
+                                                        participants: {
+                                                            type: 'integer',
+                                                            description:
+                                                                '已报名人数',
+                                                        },
+                                                        maxParticipants: {
+                                                            type: 'integer',
+                                                            description:
+                                                                '最大人数',
+                                                        },
+                                                        canJoin: {
+                                                            type: 'boolean',
+                                                            description:
+                                                                '是否可报名',
+                                                        },
+                                                        hasJoined: {
+                                                            type: 'boolean',
+                                                            description:
+                                                                '是否已报名',
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                            total: { type: 'integer' },
+                                            page: { type: 'integer' },
+                                            limit: { type: 'integer' },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    '/api/activity/{id}': {
+        get: {
+            tags: ['🎉 活动管理 (Activity)'],
+            summary: '获取活动详情',
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'string' },
+                    description: '活动 ID',
+                },
+            ],
+            responses: {
+                200: { description: '获取成功' },
+                404: { description: '活动不存在' },
+            },
+        },
+    },
+    '/api/activity/{id}/join': {
+        post: {
+            tags: ['🎉 活动管理 (Activity)'],
+            summary: '报名活动',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'string' },
+                    description: '活动 ID',
+                },
+            ],
+            responses: {
+                200: { description: '报名成功' },
+                404: { description: '活动不存在' },
+                409: { description: '已报名或人数已满' },
+            },
+        },
+    },
+    '/api/activity/{id}/cancel': {
+        post: {
+            tags: ['🎉 活动管理 (Activity)'],
+            summary: '取消报名',
+            description:
+                '注意：此路由必须在 `/api/activity/{id}/join` 之后定义，遵循路由匹配顺序',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'string' },
+                    description: '活动 ID',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '取消成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                },
+                            },
+                        },
+                    },
+                },
+                404: {
+                    description: '活动不存在',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                $ref: '#/components/schemas/ErrorResponse',
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+
+    // ==================== 反馈系统 ====================
+    '/api/feedback': {
+        post: {
+            tags: ['💬 反馈系统 (Feedback)'],
+            summary: '提交反馈',
+            security: [{ bearerAuth: [] }],
+            requestBody: {
+                required: true,
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            required: ['typeId', 'title', 'description'],
+                            properties: {
+                                typeId: {
+                                    type: 'integer',
+                                    enum: [1, 2, 3, 4],
+                                    description:
+                                        '【必填】反馈类型 (1:功能建议，2:问题上报，3:投诉建议，4:其他)',
+                                },
+                                urgencyId: {
+                                    type: 'integer',
+                                    enum: [1, 2, 3, 4],
+                                    description:
+                                        '【可选】紧急程度 (1:低，2:中，3:高，4:紧急)',
+                                },
+                                title: {
+                                    type: 'string',
+                                    description: '【必填】反馈标题',
+                                },
+                                description: {
+                                    type: 'string',
+                                    description: '【必填】反馈描述',
+                                },
+                                contact: {
+                                    type: 'string',
+                                    description: '【可选】联系方式',
+                                },
+                                images: {
+                                    type: 'array',
+                                    items: { type: 'string', format: 'uri' },
+                                    description: '【可选】图片 URL 列表',
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            responses: {
+                200: {
+                    description: '提交成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            id: { type: 'string' },
+                                            typeId: { type: 'integer' },
+                                            urgencyId: { type: 'integer' },
+                                            title: { type: 'string' },
+                                            description: { type: 'string' },
+                                            status: {
+                                                type: 'integer',
+                                                enum: [1, 2, 3, 4],
+                                                description: '反馈状态',
+                                            },
+                                            createdAt: {
+                                                type: 'string',
+                                                format: 'date-time',
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                400: { description: '参数错误' },
+            },
+        },
+    },
+    '/api/feedback/my': {
+        get: {
+            tags: ['💬 反馈系统 (Feedback)'],
+            summary: '获取我的反馈列表',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'page',
+                    in: 'query',
+                    schema: { type: 'integer', default: 1 },
+                    description: '页码',
+                },
+                {
+                    name: 'limit',
+                    in: 'query',
+                    schema: { type: 'integer', default: 20 },
+                    description: '每页数量',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: {
+                                        type: 'boolean',
+                                        example: true,
+                                    },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            feedbacks: {
+                                                type: 'array',
+                                                items: {
+                                                    type: 'object',
+                                                    properties: {
+                                                        id: {
+                                                            type: 'string',
+                                                            description:
+                                                                '反馈 ID',
+                                                        },
+                                                        typeId: {
+                                                            type: 'integer',
+                                                            enum: [1, 2, 3, 4],
+                                                            description:
+                                                                '反馈类型 (1:功能建议，2:问题上报，3:投诉建议，4:其他)',
+                                                        },
+                                                        urgencyId: {
+                                                            type: 'integer',
+                                                            enum: [1, 2, 3, 4],
+                                                            nullable: true,
+                                                            description:
+                                                                '紧急程度 (1:低，2:中，3:高，4:紧急)',
+                                                        },
+                                                        title: {
+                                                            type: 'string',
+                                                            description:
+                                                                '反馈标题',
+                                                        },
+                                                        description: {
+                                                            type: 'string',
+                                                            description:
+                                                                '反馈描述',
+                                                        },
+                                                        images: {
+                                                            type: 'array',
+                                                            items: {
+                                                                type: 'string',
+                                                            },
+                                                            description:
+                                                                '图片 URL 列表',
+                                                        },
+                                                        status: {
+                                                            type: 'integer',
+                                                            enum: [1, 2, 3, 4],
+                                                            description:
+                                                                '反馈状态 (1:待处理，2:处理中，3:已解决，4:已拒绝)',
+                                                        },
+                                                        reply: {
+                                                            type: 'string',
+                                                            nullable: true,
+                                                            description:
+                                                                '回复内容',
+                                                        },
+                                                        replyAt: {
+                                                            type: 'string',
+                                                            format: 'date-time',
+                                                            nullable: true,
+                                                            description:
+                                                                '回复时间',
+                                                        },
+                                                        createdAt: {
+                                                            type: 'string',
+                                                            format: 'date-time',
+                                                            description:
+                                                                '创建时间',
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                            total: {
+                                                type: 'integer',
+                                                description: '总记录数',
+                                            },
+                                            page: {
+                                                type: 'integer',
+                                                description: '当前页码',
+                                            },
+                                            limit: {
+                                                type: 'integer',
+                                                description: '每页数量',
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                401: {
+                    description: '未授权',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                $ref: '#/components/schemas/ErrorResponse',
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    '/api/feedback/{id}': {
+        get: {
+            tags: ['💬 反馈系统 (Feedback)'],
+            summary: '获取反馈详情',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'string' },
+                    description: '反馈 ID',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: {
+                                        type: 'boolean',
+                                        example: true,
+                                    },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            id: {
+                                                type: 'string',
+                                                description: '反馈 ID',
+                                            },
+                                            userId: {
+                                                type: 'object',
+                                                description: '用户信息',
+                                                properties: {
+                                                    _id: {
+                                                        type: 'string',
+                                                        description: '用户 ID',
+                                                    },
+                                                    name: {
+                                                        type: 'string',
+                                                        description: '用户名',
+                                                    },
+                                                    avatar: {
+                                                        type: 'string',
+                                                        description: '头像 URL',
+                                                    },
+                                                    studentId: {
+                                                        type: 'string',
+                                                        description: '学号',
+                                                    },
+                                                },
+                                            },
+                                            typeId: {
+                                                type: 'integer',
+                                                enum: [1, 2, 3, 4],
+                                                description:
+                                                    '反馈类型 (1:功能建议，2:问题上报，3:投诉建议，4:其他)',
+                                            },
+                                            urgencyId: {
+                                                type: 'integer',
+                                                enum: [1, 2, 3, 4],
+                                                nullable: true,
+                                                description:
+                                                    '紧急程度 (1:低，2:中，3:高，4:紧急)',
+                                            },
+                                            title: {
+                                                type: 'string',
+                                                description: '反馈标题',
+                                            },
+                                            description: {
+                                                type: 'string',
+                                                description: '反馈描述',
+                                            },
+                                            contact: {
+                                                type: 'string',
+                                                nullable: true,
+                                                description: '联系方式',
+                                            },
+                                            images: {
+                                                type: 'array',
+                                                items: { type: 'string' },
+                                                description: '图片 URL 列表',
+                                            },
+                                            status: {
+                                                type: 'integer',
+                                                enum: [1, 2, 3, 4],
+                                                description:
+                                                    '反馈状态 (1:待处理，2:处理中，3:已解决，4:已拒绝)',
+                                            },
+                                            reply: {
+                                                type: 'string',
+                                                nullable: true,
+                                                description: '回复内容',
+                                            },
+                                            repliedBy: {
+                                                type: 'string',
+                                                nullable: true,
+                                                description: '回复人 ID',
+                                            },
+                                            replyAt: {
+                                                type: 'string',
+                                                format: 'date-time',
+                                                nullable: true,
+                                                description: '回复时间',
+                                            },
+                                            createdAt: {
+                                                type: 'string',
+                                                format: 'date-time',
+                                                description: '创建时间',
+                                            },
+                                            updatedAt: {
+                                                type: 'string',
+                                                format: 'date-time',
+                                                description: '更新时间',
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                404: {
+                    description: '反馈不存在',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                $ref: '#/components/schemas/ErrorResponse',
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+};
+
+Object.assign(swaggerDoc.paths, allPaths);
+
+// 保存 JSON 文件
+const jsonPath = path.join(__dirname, '../swagger-full.json');
+fs.writeFileSync(jsonPath, JSON.stringify(swaggerDoc, null, 2), 'utf-8');
+console.log('✅ swagger-full.json 已生成:', jsonPath);
+
+console.log('\n📖 使用说明:');
+console.log('1. 启动 Swagger UI 服务：pnpm swagger');
+console.log('2. 访问 http://localhost:3001 查看完整文档');
+console.log('\n🌐 多环境配置:');
+console.log('   ✅ 开发环境：node switch-env.js development');
+console.log('   ✅ 测试环境：node switch-env.js test');
+console.log('   ✅ UAT 环境：node switch-env.js uat');
+console.log('   ✅ 生产环境：node switch-env.js production');
+console.log('\n🗄️  数据库初始化:');
+console.log('   - 开发环境：mysql -u root -p < database/init-dev.sql');
+console.log('   - 测试环境：mysql -u root -p < database/init-test.sql');
+console.log('   - UAT 环境：mysql -u root -p < database/init-uat.sql');
+console.log('   - 生产环境：mysql -u root -p < database/init-production.sql');
+console.log('\n💡 特性:');
+console.log('   ✅ 数字错误码（2001, 3001, 4001 等）');
+console.log('   ✅ 四环境配置文件（独立数据库和端口）');
+console.log('   ✅ 完整的字段描述和枚举值映射');
+console.log('   ✅ 必填/可选参数标注');
+console.log('   ✅ 统一的响应格式规范');

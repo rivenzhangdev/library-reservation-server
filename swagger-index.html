@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图书馆座位预约系统 - API 文档</title>
+    <link rel="stylesheet" type="text/css" href="/swagger-ui/swagger-ui.css" />
+    <style>
+        html {
+            box-sizing: border-box;
+            overflow: -moz-scrollbars-vertical;
+            overflow-y: scroll;
+        }
+        
+        *, *:before, *:after {
+            box-sizing: inherit;
+        }
+        
+        body {
+            margin: 0;
+            background: #fafafa;
+        }
+        
+        .topbar {
+            display: none;
+        }
+        
+        .info {
+            margin: 20px 0;
+        }
+        
+        .info h1 {
+            color: #667eea !important;
+        }
+        
+        .swagger-ui .topbar {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="swagger-ui"></div>
+
+    <script src="/swagger-ui/swagger-ui-bundle.js"></script>
+    <script src="/swagger-ui/swagger-ui-standalone-preset.js"></script>
+    
+    <script>
+        window.onload = function() {
+            // 初始化 Swagger UI
+            const ui = SwaggerUIBundle({
+                url: "/swagger.json",
+                dom_id: '#swagger-ui',
+                deepLinking: true,
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIStandalonePreset
+                ],
+                plugins: [
+                    SwaggerUIBundle.plugins.DownloadUrl
+                ],
+                layout: "StandaloneLayout",
+                validatorUrl: null,
+                displayRequestDuration: true,
+                filter: true,
+                showExtensions: true,
+                showCommonExtensions: true,
+                docExpansion: "list",
+                defaultModelsExpandDepth: 2,
+                defaultModelExpandDepth: 2,
+                onComplete: function() {
+                    console.log('Swagger UI 加载完成');
+                },
+                requestInterceptor: function(request) {
+                    console.log('请求:', request.method, request.url);
+                    return request;
+                },
+                responseInterceptor: function(response) {
+                    console.log('响应:', response.status, response.statusText);
+                    return response;
+                }
+            });
+            
+            // 将 UI 实例暴露到全局，方便调试
+            window.ui = ui;
+            
+            console.log('Swagger UI 已初始化');
+            console.log('API 文档 URL:', '/swagger.json');
+        };
+    </script>
+</body>
+</html>
