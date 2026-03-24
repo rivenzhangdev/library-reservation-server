@@ -13,6 +13,7 @@
         "format:check": "prettier --check \"src/**/*.{ts,js,json,md}\"",
         "prepare": "husky install",
         "commitlint": "commitlint --edit $1",
+        "commit": "git-cz",
         "db:init": "ts-node src/database/init-database.ts",
         "db:reset": "ts-node src/database/reset-database.ts",
         "db:mongo:init": "node tools/init-mongodb.js",
@@ -25,6 +26,11 @@
         "switch:env:prod": "node scripts/switch-env.js prod && pnpm dev",
         "config:env": "node scripts/config-env.js",
         "config:env:check": "node scripts/config-env.js --check"
+    },
+    "config": {
+        "commitizen": {
+            "path": "./node_modules/cz-conventional-changelog"
+        }
     },
     "keywords": [
         "library",
@@ -62,6 +68,8 @@
         "@types/koa__cors": "^5.0.0",
         "@typescript-eslint/eslint-plugin": "^8.57.2",
         "@typescript-eslint/parser": "^8.57.2",
+        "commitizen": "^4.3.1",
+        "cz-conventional-changelog": "^3.3.0",
         "eslint": "^8.56.0",
         "eslint-config-prettier": "^9.1.0",
         "eslint-plugin-prettier": "^5.0.1",

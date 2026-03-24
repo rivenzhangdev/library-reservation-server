@@ -106,8 +106,8 @@ console.log(
 
 try {
     // 读取 .env.${targetEnv} 文件内容
-    const sourceFile = path.join(__dirname, `.env.${targetEnv}`);
-    const targetFile = path.join(__dirname, '.env');
+    const sourceFile = path.join(__dirname, '..', `.env.${targetEnv}`);
+    const targetFile = path.join(__dirname, '..', '.env');
 
     if (!fs.existsSync(sourceFile)) {
         throw new Error(`配置文件不存在：${sourceFile}`);
