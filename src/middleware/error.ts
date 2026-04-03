@@ -11,7 +11,7 @@ export async function errorHandler(ctx: Context, next: Next) {
             ctx.body = {
                 success: false,
                 error: {
-                    code: ErrorCodes.NOT_FOUND,
+                    code: String(ErrorCodes.NOT_FOUND),
                     message: 'Resource not found',
                 },
             };
@@ -25,7 +25,7 @@ export async function errorHandler(ctx: Context, next: Next) {
             ctx.body = {
                 success: false,
                 error: {
-                    code: error.errorCode ?? ErrorCodes.INTERNAL_ERROR,
+                    code: String(error.errorCode ?? ErrorCodes.INTERNAL_ERROR),
                     message: error.message ?? 'Internal server error',
                 },
             };
@@ -35,7 +35,7 @@ export async function errorHandler(ctx: Context, next: Next) {
             ctx.body = {
                 success: false,
                 error: {
-                    code: ErrorCodes.INTERNAL_ERROR,
+                    code: String(ErrorCodes.INTERNAL_ERROR),
                     message:
                         process.env.NODE_ENV === 'development'
                             ? error.message
@@ -54,12 +54,32 @@ export class CustomError extends Error {
 
     constructor(
         message: string,
-        errorCode: ErrorCodeValue = ErrorCodes.INTERNAL_ERROR,
-        status: number = 200
+        // 为了兼容历史写法：很多地方直接传入 403/500（期望为 HTTP 状态），
+        // 也有地方传入 ErrorCodes.xxx（数字错误码）。这里做兼容处理：
+        // - 如果第二个参数在 100-599 范围内，则视为 HTTP 状态码（status）
+        // - 否则视为 errorCode（数字错误码），第三个参数可用于指定 status
+        codeOrStatus?: number,
+        statusArg?: number
     ) {
         super(message);
         this.isCustom = true;
-        this.status = status; // 保留 status 用于内部逻辑，但中间件会统一设置为 200
-        this.errorCode = errorCode;
+        // 兼容逻辑：当传入 HTTP 状态（例如 403, 500）时将其作为 status
+        if (
+            typeof codeOrStatus === 'number' &&
+            codeOrStatus >= 100 &&
+            codeOrStatus < 600
+        ) {
+            this.status = codeOrStatus;
+            this.errorCode =
+                typeof statusArg === 'number'
+                    ? (statusArg as ErrorCodeValue)
+                    : ErrorCodes.INTERNAL_ERROR;
+        } else {
+            this.errorCode =
+                typeof codeOrStatus === 'number'
+                    ? (codeOrStatus as ErrorCodeValue)
+                    : ErrorCodes.INTERNAL_ERROR;
+            this.status = typeof statusArg === 'number' ? statusArg : 200;
+        }
     }
 }
