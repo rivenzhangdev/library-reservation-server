@@ -91,11 +91,7 @@ const userSchema = new Schema<IUser>(
     }
 );
 
-// 创建索引
-userSchema.index({ username: 1 });
-userSchema.index({ email: 1 });
-userSchema.index({ phone: 1 });
-userSchema.index({ studentId: 1 });
+// 创建索引（保留非重复索引）
 userSchema.index({ role: 1 });
 userSchema.index({ 'activityRegistrations.activity': 1 });
 
