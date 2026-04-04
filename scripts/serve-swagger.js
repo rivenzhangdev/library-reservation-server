@@ -7,6 +7,13 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
+// 加载项目 .env（若存在），使 SWAGGER_PORT 等配置可用
+try {
+    require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+} catch (e) {
+    // ignore if dotenv not available
+}
+
 // 获取 swagger-ui-dist 的路径
 const swaggerUiAssetPath = require('swagger-ui-dist').getAbsoluteFSPath();
 

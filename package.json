@@ -6,7 +6,11 @@
     "scripts": {
         "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
         "build": "tsc",
-        "start": "node dist/app.js",
+        "start": "pnpm start:dev",
+        "start:dev": "cross-env NODE_ENV=development PORT=3000 pnpm dev",
+        "start:test": "cross-env NODE_ENV=test PORT=3001 pnpm dev",
+        "start:uat": "cross-env NODE_ENV=uat PORT=3002 pnpm dev",
+        "start:prod": "cross-env NODE_ENV=production PORT=3003 node dist/app.js",
         "lint": "eslint src --ext .ts",
         "lint:fix": "eslint src --ext .ts --fix",
         "format": "prettier --write \"src/**/*.{ts,js,json,md}\"",
@@ -79,6 +83,7 @@
         "prettier": "^3.1.1",
         "swagger-ui-dist": "^5.32.1",
         "ts-node": "^10.9.2",
-        "ts-node-dev": "^2.0.0"
+        "ts-node-dev": "^2.0.0",
+        "cross-env": "^7.0.3"
     }
 }
