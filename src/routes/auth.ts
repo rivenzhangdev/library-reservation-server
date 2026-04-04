@@ -7,6 +7,7 @@ import { authMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { User } from '../models/mongodb';
 import { ErrorCodes } from '../utils/error-codes';
+import { Roles } from '../constants/roles';
 
 dotenv.config();
 
@@ -160,7 +161,7 @@ router.post('/wxlogin', async (ctx) => {
                 password: await bcrypt.hash(session.openid, 10),
                 avatar: userInfo?.avatarUrl,
                 name: userInfo?.nickName ?? 'WeChat User',
-                role: 'user',
+                role: Roles.USER,
                 creditScore: 100,
                 studentId: null,
                 isOpenidVerified: true,

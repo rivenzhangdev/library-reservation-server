@@ -77,27 +77,35 @@ export enum UserType {
 /**
  * 通知类型 (MongoDB)
  * 0: 系统通知
- * 1: 预约提醒
+ * 1: 预约通知
  * 2: 活动通知
- * 3: 违规通知
+ * 3: 营销通知
  */
 export enum NotificationType {
     SYSTEM = 0,
-    REMINDER = 1,
+    BOOKING = 1,
     ACTIVITY = 2,
-    VIOLATION = 3,
+    MARKETING = 3,
 }
 
 /**
  * 活动状态 (MongoDB)
- * 0: 报名中
+ * 0: 未开始
  * 1: 进行中
  * 2: 已结束
- * 3: 已取消
  */
 export enum ActivityStatus {
-    REGISTERING = 0,
+    UPCOMING = 0,
     ONGOING = 1,
     ENDED = 2,
-    CANCELED = 3,
+}
+
+/**
+ * 信用记录类型
+ * 0: 加分
+ * 1: 减分
+ */
+export enum CreditType {
+    ADD = 0,
+    DEDUCT = 1,
 }

@@ -7,7 +7,7 @@ export interface IActivity extends Document {
     startTime: Date;
     endTime: Date;
     location: string;
-    status: 'ongoing' | 'upcoming' | 'ended';
+    status: number; // 0: upcoming, 1: ongoing, 2: ended
     participants: mongoose.Types.ObjectId[];
     maxParticipants: number;
     rules: string;
@@ -20,15 +20,15 @@ export interface IActivity extends Document {
 const activitySchema = new Schema<IActivity>(
     {
         title: { type: String, required: true },
-        description: { type: String, required: true },
+        description: { type: String, default: '' },
         coverImage: String,
         startTime: { type: Date, required: true },
         endTime: { type: Date, required: true },
-        location: { type: String, required: true },
+        location: { type: String, default: '' },
         status: {
-            type: String,
-            enum: ['ongoing', 'upcoming', 'ended'],
-            default: 'upcoming',
+            type: Number,
+            enum: [0, 1, 2],
+            default: 0,
         },
         participants: [{ type: Schema.Types.ObjectId, ref: 'User' }],
         maxParticipants: { type: Number, default: 100 },

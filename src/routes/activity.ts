@@ -30,6 +30,27 @@ router.get('/', async (ctx) => {
 });
 
 /**
+ * @route GET /api/activity/list
+ * @desc Get activity list (compat for admin)
+ */
+router.get('/list', async (ctx) => {
+    try {
+        const activities = await Activity.find().lean();
+        ctx.body = {
+            success: true,
+            data: activities,
+        };
+    } catch (error: any) {
+        console.error('获取活动列表失败:', error);
+        ctx.status = 500;
+        ctx.body = {
+            success: false,
+            message: '获取活动列表失败',
+        };
+    }
+});
+
+/**
  * @route GET /api/activity/:id
  * @desc Get activity details interface
  */
@@ -79,9 +100,8 @@ router.post('/join/:id', authMiddleware, async (ctx) => {
             );
         }
 
-        if (activity.status !== ActivityStatus.REGISTERING) {
-            // Use numeric enum
-            // status is numeric enum: 0:Registering, 1:Ongoing, 2:Ended, 3:Cancelled
+        if (activity.status !== ActivityStatus.UPCOMING) {
+            // status is numeric enum: 0:Upcoming, 1:Ongoing, 2:Ended
             const errorCode =
                 activity.status === ActivityStatus.ONGOING
                     ? ErrorCodes.ACTIVITY_IN_PROGRESS

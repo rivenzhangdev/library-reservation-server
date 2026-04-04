@@ -2,7 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface INotification extends Document {
     userId: mongoose.Types.ObjectId;
-    type: 'system' | 'booking' | 'activity' | 'marketing';
+    type: number; // 0: system, 1: booking, 2: activity, 3: marketing
     title: string;
     content: string;
     time: Date;
@@ -15,8 +15,8 @@ const notificationSchema = new Schema<INotification>(
     {
         userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
         type: {
-            type: String,
-            enum: ['system', 'booking', 'activity', 'marketing'],
+            type: Number,
+            enum: [0, 1, 2, 3],
             required: true,
         },
         title: { type: String, required: true },

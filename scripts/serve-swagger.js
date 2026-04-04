@@ -118,8 +118,19 @@ function startServer(port) {
 
         // 处理 Swagger JSON 文件（优先使用完整版）
         if (req.url === '/swagger.json' || req.url === '/swagger-full.json') {
-            const swaggerJsonPath = path.join(__dirname, 'swagger-full.json');
-            if (fs.existsSync(swaggerJsonPath)) {
+            // 尝试从当前 scripts 目录读取 swagger-full.json，若不存在则回退到上级目录（项目根目录）
+            const candidatePaths = [
+                path.join(__dirname, 'swagger-full.json'),
+                path.join(__dirname, '..', 'swagger-full.json'),
+            ];
+            let swaggerJsonPath = null;
+            for (const p of candidatePaths) {
+                if (fs.existsSync(p)) {
+                    swaggerJsonPath = p;
+                    break;
+                }
+            }
+            if (swaggerJsonPath) {
                 const swaggerJson = fs.readFileSync(swaggerJsonPath, 'utf8');
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(swaggerJson);
@@ -133,8 +144,26 @@ function startServer(port) {
 
         // 处理根路径，重定向到 index.html
         if (req.url === '/' || req.url === '/index.html') {
-            serveFile(path.join(__dirname, 'swagger-index.html'), res);
-            return;
+            // 尝试从 scripts 目录或项目根读取 swagger-index.html
+            const candidateIndexPaths = [
+                path.join(__dirname, 'swagger-index.html'),
+                path.join(__dirname, '..', 'swagger-index.html'),
+            ];
+            let indexPath = null;
+            for (const p of candidateIndexPaths) {
+                if (fs.existsSync(p)) {
+                    indexPath = p;
+                    break;
+                }
+            }
+            if (indexPath) {
+                serveFile(indexPath, res);
+                return;
+            } else {
+                res.writeHead(404, { 'Content-Type': 'text/plain' });
+                res.end('swagger-index.html not found');
+                return;
+            }
         }
 
         // 处理 Swagger UI 资源

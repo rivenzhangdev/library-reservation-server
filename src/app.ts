@@ -14,6 +14,9 @@ import bookingRoutes from './routes/booking';
 import notificationRoutes from './routes/notification';
 import activityRoutes from './routes/activity';
 import feedbackRoutes from './routes/feedback';
+import compatRoutes from './routes/compat';
+import uploadsRoutes from './routes/uploads';
+import uploadsAdminRoutes from './routes/uploads-admin';
 
 // 导入数据库连接
 import { testConnection, syncDatabase } from './database/mysql';
@@ -46,6 +49,15 @@ app.use(notificationRoutes.routes()).use(notificationRoutes.allowedMethods());
 app.use(activityRoutes.routes()).use(activityRoutes.allowedMethods());
 
 app.use(feedbackRoutes.routes()).use(feedbackRoutes.allowedMethods());
+
+// 静态上传文件服务 (simple)
+app.use(uploadsRoutes.routes()).use(uploadsRoutes.allowedMethods());
+
+// admin uploads management (includes public POST /api/uploads for compatibility)
+app.use(uploadsAdminRoutes.routes()).use(uploadsAdminRoutes.allowedMethods());
+
+// 兼容管理端调用的路由（/api/bookings, /api/seat, /api/floors 等）
+app.use(compatRoutes.routes()).use(compatRoutes.allowedMethods());
 
 // 启动服务器
 async function startServer() {

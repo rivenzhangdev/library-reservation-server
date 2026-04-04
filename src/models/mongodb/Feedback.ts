@@ -2,20 +2,27 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IFeedback extends Document {
     userId: mongoose.Types.ObjectId;
-    typeId: string; // suggestion|bug|complaint|other
+    typeId: number; // 1: suggestion,2:bug,3:complaint,4:other
     typeName: string;
-    urgencyId?: string; // low|medium|high|urgent
+    urgencyId?: number; // 1:low,2:medium,3:high,4:urgent
     urgencyName?: string;
     title: string;
     description: string;
     contact?: string;
     images?: string[];
-    status: 'pending' | 'processing' | 'resolved' | 'rejected';
+    status: number; // 1:pending,2:processing,3:resolved,4:rejected
     reply?: string;
     repliedBy?: mongoose.Types.ObjectId;
     replyAt?: Date;
     processedBy?: mongoose.Types.ObjectId;
     processedAt?: Date;
+    processedReason?: string;
+    comments?: Array<{
+        operator: string;
+        content: string;
+        date: Date;
+        isOfficial?: boolean;
+    }>;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -28,14 +35,14 @@ const feedbackSchema = new Schema<IFeedback>(
             required: true,
         },
         typeId: {
-            type: String,
+            type: Number,
             required: true,
-            enum: ['suggestion', 'bug', 'complaint', 'other'],
+            enum: [1, 2, 3, 4],
         },
         typeName: { type: String, required: true },
         urgencyId: {
-            type: String,
-            enum: ['low', 'medium', 'high', 'urgent'],
+            type: Number,
+            enum: [1, 2, 3, 4],
         },
         urgencyName: String,
         title: { type: String, required: true, trim: true },
@@ -43,15 +50,24 @@ const feedbackSchema = new Schema<IFeedback>(
         contact: String,
         images: [String],
         status: {
-            type: String,
-            enum: ['pending', 'processing', 'resolved', 'rejected'],
-            default: 'pending',
+            type: Number,
+            enum: [1, 2, 3, 4],
+            default: 1,
         },
         reply: String,
         repliedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         replyAt: Date,
         processedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         processedAt: Date,
+        processedReason: String,
+        comments: [
+            {
+                operator: String,
+                content: String,
+                date: Date,
+                isOfficial: Boolean,
+            },
+        ],
     },
     {
         timestamps: true,

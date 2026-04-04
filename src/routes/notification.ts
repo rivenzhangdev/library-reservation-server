@@ -62,10 +62,10 @@ router.get('/', authMiddleware, async (ctx) => {
 });
 
 /**
- * @route POST /api/notification/:id/read
+ * @route POST /api/notification/read/:id
  * @desc Mark notification as read interface
  */
-router.post('/:id/read', authMiddleware, async (ctx) => {
+router.post('/read/:id', authMiddleware, async (ctx) => {
     try {
         const notificationId = ctx.params.id;
         const userId = (ctx as any).state.user.id;

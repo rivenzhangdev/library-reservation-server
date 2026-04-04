@@ -94,7 +94,7 @@ router.post('/', authMiddleware, async (ctx) => {
         // Create notification
         await Notification.create({
             userId,
-            type: 'booking', // MongoDB Notification 使用字符串枚举
+            type: 1, // NotificationType.BOOKING
             title: 'Booking successful',
             content: `You have successfully booked a seat on ${date}`,
             relatedId: booking.id.toString(),
@@ -141,10 +141,12 @@ router.get('/my', authMiddleware, async (ctx) => {
             include: [
                 {
                     model: Seat,
+                    as: 'seat',
                     include: [
                         {
                             // eslint-disable-next-line @typescript-eslint/no-require-imports
                             model: require('../models/mysql/Floor').default,
+                            as: 'floor',
                             attributes: ['id', 'name'],
                         },
                     ],
@@ -333,11 +335,28 @@ router.post('/renew/:id', authMiddleware, async (ctx) => {
             );
         }
 
-        // TODO: Validate location information
+        // Create new booking for the renewed time slot
+        const newBooking = await Booking.create({
+            userId: userId.toString(),
+            seatId: booking.seatId,
+            date: booking.date,
+            timeSlot,
+            startTime: booking.startTime,
+            endTime: booking.endTime,
+            status: BookingStatus.UPCOMING,
+        });
 
-        // Create new booking record or update existing record
+        // Mark the new time slot as booked
+        await TimeSlotStatus.upsert({
+            seatId: booking.seatId,
+            date: booking.date,
+            timeSlot,
+            status: TimeSlotStatusValue.BOOKED,
+        });
+
         ctx.body = {
             success: true,
+            data: newBooking,
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -362,9 +381,11 @@ router.get('/:id', authMiddleware, async (ctx) => {
             include: [
                 {
                     model: Seat,
+                    as: 'seat',
                     include: [
                         {
                             model: Floor,
+                            as: 'floor',
                             attributes: ['id', 'name'],
                         },
                     ],

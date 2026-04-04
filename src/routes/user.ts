@@ -1,7 +1,9 @@
 import Router from 'koa-router';
 import { authMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
-import { CreditRecord, User } from '../models/mongodb';
+import { CreditRecord, Feedback, User } from '../models/mongodb';
+import { Seat } from '../models/mysql';
+import { saveBase64Image } from '../utils/upload';
 import { ErrorCodes } from '../utils/error-codes';
 
 const router = new Router({ prefix: '/api/user' });
@@ -52,7 +54,20 @@ router.put('/profile', authMiddleware, async (ctx) => {
 
         const updateData: any = {};
         if (name !== undefined) updateData.name = name;
-        if (avatar !== undefined) updateData.avatar = avatar;
+        if (avatar !== undefined) {
+            // if avatar is base64 data URL, save to uploads and set url
+            if (typeof avatar === 'string' && avatar.startsWith('data:')) {
+                try {
+                    const url = saveBase64Image(avatar);
+                    updateData.avatar = url;
+                } catch (e) {
+                    console.error('Save avatar failed', e);
+                    updateData.avatar = avatar;
+                }
+            } else {
+                updateData.avatar = avatar;
+            }
+        }
 
         await User.updateById(userId, updateData);
 
@@ -179,6 +194,38 @@ router.post('/favorite/:seatId', authMiddleware, async (ctx) => {
 });
 
 /**
+ * @route GET /api/user/favorites
+ * @desc Get user's favorite seats with details
+ */
+router.get('/favorites', authMiddleware, async (ctx) => {
+    try {
+        const userId = (ctx as any).state.user.id;
+        const user = await User.findById(userId).select('favorites');
+
+        if (!user) {
+            throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
+        }
+
+        const seatIds = user.favorites.map((id) => parseInt(id.toString()));
+        const seats =
+            seatIds.length > 0
+                ? await Seat.findAll({ where: { id: seatIds } })
+                : [];
+
+        ctx.body = {
+            success: true,
+            data: seats,
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to get favorites',
+            ErrorCodes.INTERNAL_ERROR
+        );
+    }
+});
+
+/**
  * @route GET /api/user/credit
  * @desc Get credit score interface
  */
@@ -275,13 +322,27 @@ router.get('/credit/records', authMiddleware, async (ctx) => {
 router.post('/feedback', authMiddleware, async (ctx) => {
     try {
         const userId = (ctx as any).state.user.id;
-        const { content, contact, type } = ctx.request.body as any;
+        const {
+            typeId,
+            typeName,
+            urgencyId,
+            urgencyName,
+            title,
+            description,
+            contact,
+            images,
+        } = ctx.request.body as any;
 
         const feedback = await Feedback.create({
             userId,
-            content,
+            typeId,
+            typeName,
+            urgencyId,
+            urgencyName,
+            title,
+            description,
             contact,
-            type,
+            images,
         });
 
         ctx.body = {
@@ -304,7 +365,9 @@ router.post('/feedback', authMiddleware, async (ctx) => {
 router.get('/feedback/my', authMiddleware, async (ctx) => {
     try {
         const userId = (ctx as any).state.user.id;
-        const feedbacks = await Feedback.findByUserId(userId);
+        const feedbacks = await Feedback.find({ userId }).sort({
+            createdAt: -1,
+        });
 
         ctx.body = {
             success: true,
@@ -328,7 +391,7 @@ router.get('/feedback/my', authMiddleware, async (ctx) => {
  */
 router.get('/feedback/:id', authMiddleware, async (ctx) => {
     try {
-        const feedbackId = parseInt(ctx.params.id);
+        const feedbackId = ctx.params.id;
 
         const feedback = await Feedback.findById(feedbackId);
 

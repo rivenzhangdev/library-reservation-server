@@ -1,7 +1,9 @@
 import Router from 'koa-router';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, optionalAuthMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { Feedback, User } from '../models/mongodb';
+import { Roles } from '../constants/roles';
+import { Upload } from '../models/mongodb';
 import { ErrorCodes } from '../utils/error-codes';
 
 const router = new Router({ prefix: '/api/feedback' });
@@ -43,13 +45,19 @@ enum FeedbackStatus {
  *   }
  * }
  */
-router.post('/', authMiddleware, async (ctx) => {
+router.post('/', optionalAuthMiddleware, async (ctx) => {
     try {
-        const userId = (ctx as any).state.user.id;
+        // 如果有登录用户则使用登录用户，否则使用 guest 用户作为默认提交者
+        let userId = (ctx as any).state.user?.id;
+        if (!userId) {
+            // 尝试查找 guest 用户
+            const guest = await User.findOne({ username: 'guest' });
+            if (guest) userId = guest._id;
+        }
+
         const { typeId, urgencyId, title, description, contact, images } = ctx
             .request.body as any;
 
-        // 验证必填项
         if (!typeId || !title || !description) {
             throw new CustomError(
                 'Missing required parameters',
@@ -57,19 +65,56 @@ router.post('/', authMiddleware, async (ctx) => {
             );
         }
 
-        // 创建反馈
+        // 支持 numeric (1..4) 或 string ('suggestion'...) 的 typeId 与 urgencyId
+        const typeMap: any = {
+            1: 1,
+            2: 2,
+            3: 3,
+            4: 4,
+            suggestion: 1,
+            bug: 2,
+            complaint: 3,
+            other: 4,
+        };
+        const typeNameMap: any = {
+            1: '功能建议',
+            2: '问题上报',
+            3: '投诉建议',
+            4: '其他',
+        };
+        const urgencyMap: any = {
+            1: 1,
+            2: 2,
+            3: 3,
+            4: 4,
+            low: 1,
+            medium: 2,
+            high: 3,
+            urgent: 4,
+        };
+        const urgencyNameMap: any = {
+            1: '低',
+            2: '中等',
+            3: '高',
+            4: '紧急',
+        };
+
+        const t = typeMap[typeId] || 4;
+        const u = urgencyId ? urgencyMap[urgencyId] || undefined : undefined;
+
         const feedback = await Feedback.create({
             userId,
-            typeId: parseInt(typeId), // 确保是数字
-            urgencyId: urgencyId ? parseInt(urgencyId) : undefined, // 确保是数字
+            typeId: t,
+            typeName: typeNameMap[t] || '',
+            urgencyId: u,
+            urgencyName: u ? urgencyNameMap[u] : undefined,
             title,
             description,
             contact,
             images: images ?? [],
-            status: FeedbackStatus.PENDING, // 使用数字枚举值
+            status: FeedbackStatus.PENDING,
         });
 
-        // 填充用户信息
         const feedbackWithUser = await Feedback.findById(feedback._id).populate(
             'userId',
             'name avatar studentId'
@@ -80,13 +125,15 @@ router.post('/', authMiddleware, async (ctx) => {
             data: {
                 id: feedbackWithUser?._id,
                 userId: feedbackWithUser?.userId,
-                typeId: feedbackWithUser?.typeId, // 数字类型
-                urgencyId: feedbackWithUser?.urgencyId, // 数字类型
+                typeId: feedbackWithUser?.typeId,
+                typeName: feedbackWithUser?.typeName,
+                urgencyId: feedbackWithUser?.urgencyId,
+                urgencyName: feedbackWithUser?.urgencyName,
                 title: feedbackWithUser?.title,
                 description: feedbackWithUser?.description,
                 contact: feedbackWithUser?.contact,
                 images: feedbackWithUser?.images,
-                status: feedbackWithUser?.status, // 数字类型
+                status: feedbackWithUser?.status,
                 createdAt: feedbackWithUser?.createdAt,
             },
         };
@@ -175,6 +222,66 @@ router.get('/my', authMiddleware, async (ctx) => {
 });
 
 /**
+ * @route GET /api/feedback/list
+ * @desc 管理员获取全部反馈（分页）
+ * 权限：仅 `admin` 可访问
+ */
+router.get('/list', authMiddleware, async (ctx) => {
+    try {
+        const userId = (ctx as any).state.user.id;
+        const user = await User.findById(userId);
+        if (user?.role !== Roles.ADMIN) {
+            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
+        }
+
+        const page = parseInt((ctx.query.page as string) || '1');
+        const limit = parseInt((ctx.query.limit as string) || '20');
+
+        const total = await Feedback.countDocuments();
+
+        const feedbacks = await Feedback.find()
+            .sort({ createdAt: -1 })
+            .skip((page - 1) * limit)
+            .limit(limit)
+            .populate('userId', 'name avatar studentId')
+            .select(
+                'id userId typeId typeName urgencyId urgencyName title description images status reply replyAt createdAt'
+            );
+
+        ctx.body = {
+            success: true,
+            data: {
+                feedbacks: feedbacks.map((fb) => ({
+                    id: fb._id,
+                    userId: fb.userId,
+                    typeId: fb.typeId,
+                    typeName: fb.typeName,
+                    urgencyId: fb.urgencyId,
+                    urgencyName: fb.urgencyName,
+                    title: fb.title,
+                    description: fb.description,
+                    images: fb.images,
+                    status: fb.status,
+                    reply: fb.reply,
+                    replyAt: fb.replyAt,
+                    createdAt: fb.createdAt,
+                })),
+                total,
+                page,
+                limit,
+            },
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        console.error('Get feedback list failed:', error);
+        throw new CustomError(
+            'Failed to get feedback list',
+            ErrorCodes.GET_FEEDBACKS_ERROR
+        );
+    }
+});
+
+/**
  * @route GET /api/feedback/:id
  * @desc 获取反馈详情接口
  *
@@ -226,7 +333,7 @@ router.get('/:id', authMiddleware, async (ctx) => {
         const user = await User.findById(userId);
         if (
             feedback.userId._id.toString() !== userId &&
-            user?.role !== 'admin'
+            user?.role !== Roles.ADMIN
         ) {
             throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
         }
@@ -246,6 +353,8 @@ router.get('/:id', authMiddleware, async (ctx) => {
                 reply: feedback.reply,
                 repliedBy: feedback.repliedBy,
                 replyAt: feedback.replyAt,
+                processedReason: feedback.processedReason,
+                comments: feedback.comments || [],
                 createdAt: feedback.createdAt,
                 updatedAt: feedback.updatedAt,
             },
@@ -256,6 +365,298 @@ router.get('/:id', authMiddleware, async (ctx) => {
         throw new CustomError(
             'Failed to get feedback',
             ErrorCodes.GET_FEEDBACKS_ERROR
+        );
+    }
+});
+
+/**
+ * @route PUT /api/feedback/:id
+ * @desc 管理员处理反馈（更新 status、reply）
+ * 权限：admin
+ */
+router.put('/:id', authMiddleware, async (ctx) => {
+    try {
+        const userId = (ctx as any).state.user.id;
+        const user = await User.findById(userId);
+        if (user?.role !== Roles.ADMIN) {
+            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
+        }
+
+        const id = ctx.params.id;
+        const { status, reply } = ctx.request.body as any;
+
+        const feedback = await Feedback.findById(id);
+        if (!feedback)
+            throw new CustomError(
+                'Feedback not found',
+                ErrorCodes.FEEDBACK_NOT_FOUND
+            );
+
+        if (status) feedback.status = status;
+        if (reply) {
+            feedback.reply = reply;
+            feedback.repliedBy = user._id;
+            feedback.replyAt = new Date();
+            feedback.processedBy = user._id;
+            feedback.processedAt = new Date();
+        }
+
+        await feedback.save();
+
+        const updated = await Feedback.findById(id).populate(
+            'userId',
+            'name avatar studentId'
+        );
+
+        ctx.body = { success: true, data: updated };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        console.error('Process feedback failed:', error);
+        throw new CustomError(
+            'Failed to process feedback',
+            ErrorCodes.INTERNAL_ERROR
+        );
+    }
+});
+
+/**
+ * @route PUT /api/feedback/status/:id
+ * @desc 更新反馈状态（管理员）
+ * body: { status: string, reason?: string }
+ */
+router.put('/status/:id', authMiddleware, async (ctx) => {
+    try {
+        const userId = (ctx as any).state.user.id;
+        const user = await User.findById(userId);
+        if (user?.role !== Roles.ADMIN) {
+            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
+        }
+
+        const id = ctx.params.id;
+        const { status, reason } = ctx.request.body as any;
+
+        const feedback = await Feedback.findById(id);
+        if (!feedback)
+            throw new CustomError(
+                'Feedback not found',
+                ErrorCodes.FEEDBACK_NOT_FOUND
+            );
+
+        if (status) feedback.status = status;
+        if (reason) {
+            feedback.processedReason = reason;
+            feedback.processedBy = user._id;
+            feedback.processedAt = new Date();
+        }
+
+        await feedback.save();
+
+        ctx.body = {
+            success: true,
+            data: { feedbackId: id, newStatus: feedback.status },
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        console.error('Update feedback status failed:', error);
+        throw new CustomError(
+            'Failed to update feedback status',
+            ErrorCodes.INTERNAL_ERROR
+        );
+    }
+});
+
+/**
+ * @route POST /api/feedback/comment/:id
+ * @desc 添加反馈回复/评论
+ * body: { content: string, operator?: string }
+ */
+router.post('/comment/:id', authMiddleware, async (ctx) => {
+    try {
+        const userId = (ctx as any).state.user.id;
+        const user = await User.findById(userId);
+
+        const id = ctx.params.id;
+        const { content, operator } = ctx.request.body as any;
+        if (!content)
+            throw new CustomError(
+                'Missing required parameters',
+                ErrorCodes.INVALID_PARAMS
+            );
+
+        const feedback = await Feedback.findById(id);
+        if (!feedback)
+            throw new CustomError(
+                'Feedback not found',
+                ErrorCodes.FEEDBACK_NOT_FOUND
+            );
+
+        const opName = operator || user?.name || 'system';
+        const isOfficial = user?.role === Roles.ADMIN;
+
+        const comment = {
+            operator: opName,
+            content,
+            date: new Date(),
+            isOfficial,
+        };
+        feedback.comments = feedback.comments || [];
+        feedback.comments.push(comment as any);
+
+        await feedback.save();
+
+        ctx.body = {
+            success: true,
+            data: {
+                commentId:
+                    feedback.comments[feedback.comments.length - 1]._id || null,
+                content,
+                date: comment.date,
+            },
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        console.error('Add feedback comment failed:', error);
+        throw new CustomError(
+            'Failed to add comment',
+            ErrorCodes.INTERNAL_ERROR
+        );
+    }
+});
+
+/**
+ * @route DELETE /api/feedback/image/:id
+ * @desc 管理员删除反馈中的图片（仅移除与反馈的关联，文件与 Upload 元数据保留供管理员在“上传管理”中确认删除）
+ * body: { url: string }
+ */
+router.delete('/image/:id', authMiddleware, async (ctx) => {
+    try {
+        const userId = (ctx as any).state.user.id;
+        const user = await User.findById(userId);
+        if (user?.role !== Roles.ADMIN) {
+            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
+        }
+
+        const id = ctx.params.id;
+        const { url } = ctx.request.body as any;
+        if (!url)
+            throw new CustomError('Missing url', ErrorCodes.INVALID_PARAMS);
+
+        const feedback = await Feedback.findById(id);
+        if (!feedback)
+            throw new CustomError(
+                'Feedback not found',
+                ErrorCodes.FEEDBACK_NOT_FOUND
+            );
+
+        feedback.images = (feedback.images || []).filter((u) => u !== url);
+        await feedback.save();
+
+        // 不要立即删除文件或元数据：仅解除该 Upload 与反馈的关联（清空 refType/refId），
+        // 由管理员在上传管理页面统一确认并删除实际文件，避免误删未确认的图片。
+        try {
+            const uploadDoc = await Upload.findOne({ url });
+            if (uploadDoc) {
+                uploadDoc.refType = undefined;
+                uploadDoc.refId = undefined;
+                await uploadDoc.save();
+            }
+        } catch (e) {
+            console.error('Failed to update upload doc', e);
+        }
+
+        ctx.body = { success: true };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        console.error('Delete feedback image failed:', error);
+        throw new CustomError(
+            'Failed to delete feedback image',
+            ErrorCodes.INTERNAL_ERROR
+        );
+    }
+});
+
+/**
+ * @route GET /api/feedback/export
+ * @desc 导出反馈为 CSV
+ * query: format=csv|excel (default csv), status, startDate, endDate
+ */
+router.get('/export', authMiddleware, async (ctx) => {
+    try {
+        const userId = (ctx as any).state.user.id;
+        const user = await User.findById(userId);
+        if (user?.role !== Roles.ADMIN) {
+            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
+        }
+
+        const format = (ctx.query.format as string) || 'csv';
+        const status = ctx.query.status as string | undefined;
+        const startDate = ctx.query.startDate as string | undefined;
+        const endDate = ctx.query.endDate as string | undefined;
+
+        const filter: any = {};
+        if (status) filter.status = status;
+        if (startDate || endDate) filter.createdAt = {};
+        if (startDate) filter.createdAt.$gte = new Date(startDate);
+        if (endDate) filter.createdAt.$lte = new Date(endDate);
+
+        const feedbacks = await Feedback.find(filter)
+            .populate('userId', 'name studentId avatar')
+            .sort({ createdAt: -1 });
+
+        // Build CSV
+        const headers = [
+            'id',
+            'type',
+            'title',
+            'description',
+            'contact',
+            'urgency',
+            'status',
+            'userId',
+            'userName',
+            'studentId',
+            'createdAt',
+        ];
+        const rows = feedbacks.map((fb) => [
+            fb._id.toString(),
+            fb.typeName || fb.typeId,
+            (fb.title || '').replace(/\n/g, ' '),
+            (fb.description || '').replace(/\n/g, ' '),
+            fb.contact || '',
+            fb.urgencyName || fb.urgencyId || '',
+            fb.status,
+            fb.userId?._id?.toString() || '',
+            fb.userId?.name || '',
+            fb.userId?.studentId || '',
+            fb.createdAt ? fb.createdAt.toISOString() : '',
+        ]);
+
+        const escapeCsv = (val: any) => {
+            if (val == null) return '';
+            const s = String(val);
+            if (s.includes(',') || s.includes('\n') || s.includes('"')) {
+                return '"' + s.replace(/"/g, '""') + '"';
+            }
+            return s;
+        };
+
+        const csv = [
+            headers.join(','),
+            ...rows.map((r) => r.map(escapeCsv).join(',')),
+        ].join('\n');
+
+        const filename = `feedbacks_${new Date()
+            .toISOString()
+            .slice(0, 10)}.csv`;
+        ctx.set('Content-disposition', `attachment; filename="${filename}"`);
+        ctx.set('Content-Type', 'text/csv; charset=utf-8');
+        ctx.body = csv;
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        console.error('Export feedbacks failed:', error);
+        throw new CustomError(
+            'Failed to export feedbacks',
+            ErrorCodes.INTERNAL_ERROR
         );
     }
 });

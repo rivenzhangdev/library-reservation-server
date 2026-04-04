@@ -1,4 +1,5 @@
 import { Floor, Seat, Booking, TimeSlotStatus } from './index';
+import { Zone } from './index';
 
 /**
  * 配置 MySQL 模型之间的关系
@@ -11,6 +12,10 @@ export function setupMySQLModelRelations() {
     // Seat 和 Booking 的关系：一对多
     Seat.hasMany(Booking, { foreignKey: 'seatId', as: 'bookings' });
     Booking.belongsTo(Seat, { foreignKey: 'seatId', as: 'seat' });
+
+    // Zone 与 Seat 的关系暂不启用 (数据库尚无 zones 表和 zone_id 列)
+    // Zone.hasMany(Seat, { foreignKey: 'zoneId', as: 'seats' });
+    // Seat.belongsTo(Zone, { foreignKey: 'zoneId', as: 'zoneObj' });
 
     // Booking 和 TimeSlotStatus 的关系：一对一
     Booking.hasOne(TimeSlotStatus, {

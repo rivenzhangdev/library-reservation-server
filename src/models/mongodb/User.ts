@@ -8,7 +8,7 @@ export interface IUser extends Document {
     studentId?: string;
     name?: string;
     avatar?: string;
-    role: 'user' | 'admin';
+    role: number;
     creditScore: number;
     blacklisted: boolean;
     blacklistReason?: string;
@@ -51,7 +51,7 @@ const userSchema = new Schema<IUser>(
         studentId: { type: String, unique: true, sparse: true },
         name: String,
         avatar: String,
-        role: { type: String, enum: ['user', 'admin'], default: 'user' },
+        role: { type: Number, enum: [0, 1], default: 0 },
         creditScore: { type: Number, default: 100 },
         blacklisted: { type: Boolean, default: false },
         blacklistReason: String,
