@@ -153,32 +153,23 @@ if (!envArg) {
             { title: 'prod     生产环境 (端口 3003)', value: 'prod' },
         ];
 
-        // 使用 multiselect 支持 空格 选择，设置 max:1 只允许选择一项
+        // 使用 select 单选：上下键选择，回车确认；选择即执行（切换并启动）
         const envResp = await prompts({
-            type: 'multiselect',
+            type: 'select',
             name: 'env',
-            message: '请选择环境（使用上下键移动，空格选择，回车确认）',
+            message: '请选择环境（上下键选择，回车确认，选择即执行）',
             choices,
-            max: 1,
-            hint: '- 按 空格 选择，回车 确认',
+            initial: 0,
         });
 
-        if (!envResp || !envResp.env || envResp.env.length === 0) {
+        if (!envResp || !envResp.env) {
             console.log('已取消操作。');
             process.exit(0);
         }
 
-        const chosen = envResp.env[0];
-
-        const startResp = await prompts({
-            type: 'confirm',
-            name: 'start',
-            message: '是否立即启动服务?',
-            initial: true,
-        });
-
-        const willStart = !!startResp.start;
-        runSwitch(chosen, willStart);
+        const chosen = envResp.env;
+        // 选择即执行：切换并启动
+        runSwitch(chosen, true);
     })();
 
     return;
