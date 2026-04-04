@@ -48,6 +48,14 @@ const getMySQLConfig = () => {
 
 const config = getMySQLConfig();
 
+// 控制是否输出 SQL 日志：优先使用 MYSQL_LOGGING 环境变量（'true' / 'false'），
+// 若未设置则保持旧行为（开发环境默认开启日志）。
+const mysqlLoggingEnv = process.env.MYSQL_LOGGING;
+const shouldLog =
+    typeof mysqlLoggingEnv !== 'undefined'
+        ? mysqlLoggingEnv === 'true'
+        : process.env.NODE_ENV === 'development';
+
 const sequelize = new Sequelize(config.database, config.user, config.password, {
     host: config.host,
     port: config.port,
@@ -65,7 +73,7 @@ const sequelize = new Sequelize(config.database, config.user, config.password, {
         charset: 'utf8mb4',
         collate: 'utf8mb4_unicode_ci',
     },
-    logging: process.env.NODE_ENV === 'development' ? console.log : false,
+    logging: shouldLog ? console.log : false,
 });
 
 // 测试连接
