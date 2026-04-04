@@ -11,7 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const readline = require('readline');
+const prompts = require('prompts');
 
 // 颜色代码
 const colors = {
@@ -138,45 +138,48 @@ function runSwitch(inputEnv, startFlag) {
 }
 
 if (!envArg) {
-    // 交互式选择环境
-    const currentEnv = process.env.NODE_ENV || 'development';
-    console.log(`${colors.blue}========================================${colors.reset}`);
-    console.log(`${colors.blue}  当前环境信息                          ${colors.reset}`);
-    console.log(`${colors.blue}========================================${colors.reset}\n`);
+    (async () => {
+        const currentEnv = process.env.NODE_ENV || 'development';
+        console.log(`${colors.blue}========================================${colors.reset}`);
+        console.log(`${colors.blue}  当前环境信息                          ${colors.reset}`);
+        console.log(`${colors.blue}========================================${colors.reset}\n`);
 
-    console.log(`${colors.cyan}当前环境:${colors.reset} ${colors.yellow}${currentEnv}${colors.reset}`);
-    console.log(`${colors.cyan}可用环境:${colors.reset}`);
-    console.log(`  1) ${colors.green}dev${colors.reset}      开发环境 (端口 3000)`);
-    console.log(`  2) ${colors.green}test${colors.reset}     测试环境 (端口 3001)`);
-    console.log(`  3) ${colors.green}uat${colors.reset}       UAT 环境 (端口 3002)`);
-    console.log(`  4) ${colors.green}prod${colors.reset}     生产环境 (端口 3003)`);
-    console.log('');
+        console.log(`${colors.cyan}当前环境:${colors.reset} ${colors.yellow}${currentEnv}${colors.reset}`);
 
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(`请选择环境编号或名称（回车退出）: `, (answer) => {
-        rl.close();
-        const pick = String(answer || '').trim();
-        if (!pick) {
+        const choices = [
+            { title: 'dev      开发环境 (端口 3000)', value: 'dev' },
+            { title: 'test     测试环境 (端口 3001)', value: 'test' },
+            { title: 'uat      UAT 环境 (端口 3002)', value: 'uat' },
+            { title: 'prod     生产环境 (端口 3003)', value: 'prod' },
+        ];
+
+        // 使用 multiselect 支持 空格 选择，设置 max:1 只允许选择一项
+        const envResp = await prompts({
+            type: 'multiselect',
+            name: 'env',
+            message: '请选择环境（使用上下键移动，空格选择，回车确认）',
+            choices,
+            max: 1,
+            hint: '- 按 空格 选择，回车 确认',
+        });
+
+        if (!envResp || !envResp.env || envResp.env.length === 0) {
             console.log('已取消操作。');
             process.exit(0);
         }
 
-        let chosen = pick;
-        if (['1', '2', '3', '4'].includes(pick)) {
-            if (pick === '1') chosen = 'dev';
-            if (pick === '2') chosen = 'test';
-            if (pick === '3') chosen = 'uat';
-            if (pick === '4') chosen = 'prod';
-        }
+        const chosen = envResp.env[0];
 
-        const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
-        rl2.question(`是否立即启动服务? (Y/n): `, (startAns) => {
-            rl2.close();
-            const startFlag = String(startAns || '').trim().toLowerCase();
-            const willStart = startFlag === '' || startFlag === 'y' || startFlag === 'yes';
-            runSwitch(chosen, willStart);
+        const startResp = await prompts({
+            type: 'confirm',
+            name: 'start',
+            message: '是否立即启动服务?',
+            initial: true,
         });
-    });
+
+        const willStart = !!startResp.start;
+        runSwitch(chosen, willStart);
+    })();
 
     return;
 }

@@ -24,13 +24,8 @@
         "swagger": "node scripts/serve-swagger.js",
         "generate:swagger": "ts-node src/generate-swagger-full.ts",
         "switch:env": "node scripts/switch-env.js",
-        "switch:env:dev": "node scripts/switch-env.js dev && pnpm dev",
-        "switch:env:test": "node scripts/switch-env.js test && pnpm dev",
-        "switch:env:uat": "node scripts/switch-env.js uat && pnpm dev",
-        "switch:env:prod": "node scripts/switch-env.js prod && pnpm dev",
         "config:env": "node scripts/config-env.js",
-        "config:env:check": "node scripts/config-env.js --check",
-        "test:upload": "node scripts/test-upload.js"
+        "config:env:check": "node scripts/config-env.js --check"
     },
     "config": {
         "commitizen": {
@@ -48,6 +43,7 @@
     "dependencies": {
         "@types/node": "^20.10.0",
         "axios": "^1.13.6",
+        "prompts": "^2.4.2",
         "bcryptjs": "^2.4.3",
         "dotenv": "^16.3.1",
         "jsonwebtoken": "^9.0.2",
