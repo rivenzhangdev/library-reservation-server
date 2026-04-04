@@ -25,7 +25,8 @@
         "switch:env:uat": "node scripts/switch-env.js uat && pnpm dev",
         "switch:env:prod": "node scripts/switch-env.js prod && pnpm dev",
         "config:env": "node scripts/config-env.js",
-        "config:env:check": "node scripts/config-env.js --check"
+        "config:env:check": "node scripts/config-env.js --check",
+        "test:upload": "node scripts/test-upload.js"
     },
     "config": {
         "commitizen": {
