@@ -1,6 +1,7 @@
+/* eslint-disable */
 import Router from 'koa-router';
 import { Notification } from '../models/mongodb';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, adminMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { ErrorCodes } from '../utils/error-codes';
 
@@ -57,6 +58,44 @@ router.get('/', authMiddleware, async (ctx) => {
         throw new CustomError(
             'Failed to get notifications',
             ErrorCodes.NOTIFICATION_NOT_FOUND
+        );
+    }
+});
+
+/**
+ * @route POST /api/notification
+ * @desc Create notification (admin only)
+ */
+router.post('/', authMiddleware, adminMiddleware, async (ctx) => {
+    try {
+        const body: any = ctx.request.body || {};
+        const { userId, type, title, content, time, relatedId, data } = body;
+
+        if (type === undefined || !title || !content) {
+            throw new CustomError(
+                'Missing required parameters',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        const obj: any = {
+            userId,
+            type,
+            title,
+            content,
+        };
+        if (relatedId) obj.relatedId = relatedId;
+        if (data) obj.data = data;
+        if (time) obj.time = new Date(time);
+
+        const created = await Notification.create(obj as any);
+
+        ctx.body = { success: true, data: { id: created._id } };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to create notification',
+            ErrorCodes.INTERNAL_ERROR
         );
     }
 });
@@ -150,6 +189,86 @@ router.delete('/:id', authMiddleware, async (ctx) => {
         throw new CustomError(
             'Failed to delete notification',
             ErrorCodes.DELETE_NOTIFICATION_ERROR
+        );
+    }
+});
+
+/**
+ * @route GET /api/notification/:id
+ * @desc Get notification detail (admin)
+ */
+router.get('/:id', authMiddleware, adminMiddleware, async (ctx) => {
+    try {
+        const notificationId = ctx.params.id;
+
+        const notification = await Notification.findById(notificationId);
+
+        if (!notification) {
+            throw new CustomError(
+                'Notification not found',
+                ErrorCodes.NOTIFICATION_NOT_FOUND
+            );
+        }
+
+        ctx.body = {
+            success: true,
+            data: {
+                id: notification._id,
+                userId: notification.userId,
+                title: notification.title,
+                content: notification.content,
+                type: notification.type,
+                data: notification.data,
+                relatedId: notification.relatedId,
+                time: notification.time,
+                isRead: notification.isRead,
+            },
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to get notification detail',
+            ErrorCodes.GET_NOTIFICATIONS_ERROR
+        );
+    }
+});
+
+/**
+ * @route PATCH /api/notification/:id
+ * @desc Update notification (admin only)
+ */
+router.patch('/:id', authMiddleware, adminMiddleware, async (ctx) => {
+    try {
+        const notificationId = ctx.params.id;
+        const body: any = ctx.request.body || {};
+
+        const notification = await Notification.findById(notificationId);
+        if (!notification) {
+            throw new CustomError(
+                'Notification not found',
+                ErrorCodes.NOTIFICATION_NOT_FOUND
+            );
+        }
+
+        const allowed: any = {};
+        if (body.title !== undefined) allowed.title = body.title;
+        if (body.content !== undefined) allowed.content = body.content;
+        if (body.type !== undefined) allowed.type = body.type;
+        if (body.relatedId !== undefined) allowed.relatedId = body.relatedId;
+        if (body.data !== undefined) allowed.data = body.data;
+        if (body.time !== undefined) allowed.time = new Date(body.time);
+        if (body.userId !== undefined) allowed.userId = body.userId;
+
+        // apply updates
+        Object.assign(notification, allowed);
+        await notification.save();
+
+        ctx.body = { success: true };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to update notification',
+            ErrorCodes.UPDATE_NOTIFICATION_ERROR
         );
     }
 });

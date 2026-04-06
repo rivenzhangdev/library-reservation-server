@@ -1,3 +1,4 @@
+/* eslint-disable */
 /* eslint-disable @typescript-eslint/no-require-imports */
 import Router from 'koa-router';
 import dotenv from 'dotenv';
@@ -245,12 +246,20 @@ router.post('/login', async (ctx) => {
     try {
         const { username, password } = ctx.request.body as any;
         if (!username) {
-            throw new CustomError('username required', ErrorCodes.INVALID_PARAMS, 400);
+            throw new CustomError(
+                'username required',
+                ErrorCodes.INVALID_PARAMS,
+                400
+            );
         }
 
         const user = await User.findOne({ username }).lean();
         if (!user) {
-            throw new CustomError('Invalid credentials', ErrorCodes.UNAUTHORIZED, 401);
+            throw new CustomError(
+                'Invalid credentials',
+                ErrorCodes.UNAUTHORIZED,
+                401
+            );
         }
 
         let ok = false;
@@ -266,7 +275,11 @@ router.post('/login', async (ctx) => {
         }
 
         if (!ok) {
-            throw new CustomError('Invalid credentials', ErrorCodes.UNAUTHORIZED, 401);
+            throw new CustomError(
+                'Invalid credentials',
+                ErrorCodes.UNAUTHORIZED,
+                401
+            );
         }
 
         const token = jwt.sign(
@@ -416,6 +429,22 @@ router.put('/seat/:id', authMiddleware, async (ctx) => {
         ctx.body = { success: true, data: seat };
     } catch (error: any) {
         if (error.isCustom) throw error;
+        // Handle common Sequelize validation/unique constraint errors to return clearer messages
+        if (error?.name === 'SequelizeUniqueConstraintError') {
+            throw new CustomError(
+                'Validation error: unique constraint',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+        if (error?.name === 'SequelizeValidationError') {
+            const details = (error.errors || [])
+                .map((e: any) => e.message)
+                .join('; ');
+            throw new CustomError(
+                `Validation error${details ? ': ' + details : ''}`,
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
         throw new CustomError(
             error.message || 'Failed to update seat',
             ErrorCodes.INTERNAL_ERROR
@@ -551,7 +580,12 @@ router.get('/user/list', authMiddleware, async (ctx) => {
                     const n = Number(blacklisted);
                     if (!Number.isNaN(n)) return n === 1;
                     const lower = blacklisted.toLowerCase();
-                    return lower === 'true' || lower === '1' || lower === 'blacklisted' || lower === 'banned';
+                    return (
+                        lower === 'true' ||
+                        lower === '1' ||
+                        lower === 'blacklisted' ||
+                        lower === 'banned'
+                    );
                 }
                 return false;
             })();

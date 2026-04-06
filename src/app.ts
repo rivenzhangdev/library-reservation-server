@@ -21,6 +21,7 @@ import uploadsAdminRoutes from './routes/uploads-admin';
 // 导入数据库连接
 import { testConnection, syncDatabase } from './database/mysql';
 import { connectMongoDB } from './database/mongodb';
+import Router from 'koa-router';
 
 // 导入模型关系配置
 import { setupMySQLModelRelations } from './models/mysql/relations';
@@ -59,6 +60,13 @@ app.use(uploadsAdminRoutes.routes()).use(uploadsAdminRoutes.allowedMethods());
 // 兼容管理端调用的路由（/api/bookings, /api/seat, /api/floors 等）
 app.use(compatRoutes.routes()).use(compatRoutes.allowedMethods());
 
+// 简单健康检查
+const healthRouter = new Router();
+healthRouter.get('/health', async (ctx) => {
+    ctx.body = { status: 'ok' };
+});
+app.use(healthRouter.routes()).use(healthRouter.allowedMethods());
+
 // 启动服务器
 async function startServer() {
     try {
@@ -76,6 +84,11 @@ async function startServer() {
         app.listen(PORT, () => {
             console.log(`服务器运行在 http://localhost:${PORT ?? 3000}`);
             console.log(`环境：${process.env.NODE_ENV ?? 'development'}`);
+            console.log(
+                `Swagger UI: http://localhost:${
+                    PORT ?? 3000
+                }/swagger-index.html`
+            );
         });
 
         // 添加错误处理，避免 floating promise

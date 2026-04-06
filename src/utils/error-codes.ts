@@ -57,6 +57,7 @@ export const ErrorCodes = {
     MARK_READ_ERROR: 6003, // 标记为已读失败
     MARK_ALL_READ_ERROR: 6004, // 全部标记为已读失败
     DELETE_NOTIFICATION_ERROR: 6005, // 删除通知失败
+    UPDATE_NOTIFICATION_ERROR: 6006, // 更新通知失败
 
     // ==================== 活动相关错误 (7000-7999) ====================
     ACTIVITY_NOT_FOUND: 7001, // 活动不存在

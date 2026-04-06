@@ -11,7 +11,8 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const prompts = require('prompts');
+let inquirer = require('inquirer');
+if (inquirer && inquirer.default) inquirer = inquirer.default;
 
 // 颜色代码
 const colors = {
@@ -153,21 +154,23 @@ if (!envArg) {
             { title: 'prod     生产环境 (端口 3003)', value: 'prod' },
         ];
 
-        // 使用 select 单选：上下键选择，回车确认；选择即执行（切换并启动）
-        const envResp = await prompts({
-            type: 'select',
-            name: 'env',
-            message: '请选择环境（上下键选择，回车确认，选择即执行）',
-            choices,
-            initial: 0,
-        });
+        // 使用 inquirer list 单选：上下键选择，回车确认；选择即执行（切换并启动）
+        const answers = await inquirer.prompt([
+            {
+                type: 'list',
+                name: 'env',
+                message: '请选择环境（上下键选择，回车确认，选择即执行）',
+                choices: choices.map(c => ({ name: c.title, value: c.value })),
+                pageSize: 10,
+            },
+        ]);
 
-        if (!envResp || !envResp.env) {
+        if (!answers || !answers.env) {
             console.log('已取消操作。');
             process.exit(0);
         }
 
-        const chosen = envResp.env;
+        const chosen = answers.env;
         // 选择即执行：切换并启动
         runSwitch(chosen, true);
     })();

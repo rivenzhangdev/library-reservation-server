@@ -74,6 +74,22 @@ DB_MONGODB_URI=mongodb://localhost:27017/library_booking_dev
 
 **注意**: 所有 `.env*` 配置文件都不会提交到 Git，每个开发者需要自行配置。
 
+### MySQL 日志输出控制
+
+开发时我们在启动过程中会打印 Sequelize 执行的 SQL 语句（用于调试）。如果你不希望在控制台看到这些 SQL 日志，可以通过环境变量 `MYSQL_LOGGING` 控制：
+
+-   在 `.env.development`（或你当前使用的环境文件）中添加 `MYSQL_LOGGING=false` 来关闭 SQL 日志。
+-   要开启日志（显示 SQL），设置为 `MYSQL_LOGGING=true`。
+
+示例：
+
+```ini
+# 关闭 SQL 输出
+MYSQL_LOGGING=false
+```
+
+默认行为：如果未设置 `MYSQL_LOGGING`，开发环境（`NODE_ENV=development`）下会默认打印 SQL 日志，以便调试。
+
 ## 🚀 快速开始
 
 ### 1. 安装依赖
