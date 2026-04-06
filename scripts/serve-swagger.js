@@ -17,7 +17,12 @@ try {
 // 获取 swagger-ui-dist 的路径
 const swaggerUiAssetPath = require('swagger-ui-dist').getAbsoluteFSPath();
 
-let PORT = parseInt(process.env.SWAGGER_PORT) || 3001;
+// 计算 Swagger 端口：优先使用 SWAGGER_PORT 环境变量；若未设置，则使用应用端口 PORT + 1000；若两者都未设置，默认 4000
+let envSwagger = process.env.SWAGGER_PORT ? parseInt(process.env.SWAGGER_PORT, 10) : NaN;
+let envAppPort = process.env.PORT ? parseInt(process.env.PORT, 10) : NaN;
+let PORT = Number.isFinite(envSwagger) && !Number.isNaN(envSwagger)
+    ? envSwagger
+    : (Number.isFinite(envAppPort) && !Number.isNaN(envAppPort) ? envAppPort + 1000 : 4000);
 const MAX_PORT_RETRY = 10; // 最大重试次数
 
 // MIME 类型映射

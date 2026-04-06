@@ -29,7 +29,9 @@ import { setupMySQLModelRelations } from './models/mysql/relations';
 dotenv.config();
 
 const app = new Koa();
-const PORT = process.env.PORT ?? 3000;
+const PORT = Number(process.env.PORT) || 3000;
+// Swagger 服务使用独立端口，默认取应用端口 + 1000，或由 SWAGGER_PORT 环境变量覆盖
+const SWAGGER_PORT = Number(process.env.SWAGGER_PORT) || PORT + 1000;
 
 // 使用中间件
 app.use(errorHandler);
@@ -82,12 +84,13 @@ async function startServer() {
 
         // 启动服务
         app.listen(PORT, () => {
-            console.log(`服务器运行在 http://localhost:${PORT ?? 3000}`);
+            console.log(`服务器运行在 http://localhost:${PORT}`);
             console.log(`环境：${process.env.NODE_ENV ?? 'development'}`);
             console.log(
-                `Swagger UI: http://localhost:${
-                    PORT ?? 3000
-                }/swagger-index.html`
+                `Swagger UI（独立端口）: http://localhost:${SWAGGER_PORT}/swagger-index.html`
+            );
+            console.log(
+                `若要查看 API 文档并启动 Swagger UI，请运行：pnpm --filter library-reservation-server run swagger`
             );
         });
 
