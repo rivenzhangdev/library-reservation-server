@@ -8,6 +8,7 @@ import { CustomError } from '../middleware/error';
 import { User } from '../models/mongodb';
 import { ErrorCodes } from '../utils/error-codes';
 import { Roles } from '../constants/roles';
+import { normalizeUploadUrl } from '../utils/upload';
 
 dotenv.config();
 
@@ -98,9 +99,9 @@ const WX_APP_SECRET = process.env.WX_APP_SECRET;
  *                           type: boolean
  *                           example: false
  *                         role:
- *                           type: string
- *                           enum: [user, admin]
- *                           example: "user"
+ *                           type: integer
+ *                           enum: [0, 1]
+ *                           example: 0
  *       400:
  *         description: 请求参数错误
  *         content:
@@ -197,6 +198,35 @@ router.post('/wxlogin', async (ctx) => {
             { expiresIn: '7d' }
         );
 
+        // Set HttpOnly cookie for browser-based clients (admin UI)
+        try {
+            const COOKIE_SAME_SITE = (
+                process.env.COOKIE_SAME_SITE || 'lax'
+            ).toLowerCase();
+            const COOKIE_SECURE =
+                process.env.COOKIE_SECURE !== undefined
+                    ? process.env.COOKIE_SECURE === 'true'
+                    : process.env.NODE_ENV === 'production';
+            const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || undefined;
+
+            if (COOKIE_SAME_SITE === 'none' && !COOKIE_SECURE) {
+                console.warn(
+                    'Warning: COOKIE_SAME_SITE=None while COOKIE_SECURE is not true. Browsers will reject SameSite=None cookies unless Secure is set.'
+                );
+            }
+
+            ctx.cookies.set('token', token, {
+                httpOnly: true,
+                secure: COOKIE_SECURE,
+                sameSite: COOKIE_SAME_SITE as any,
+                maxAge: 7 * 24 * 3600 * 1000, // 7 days
+                path: '/',
+                domain: COOKIE_DOMAIN,
+            });
+        } catch (e) {
+            // ignore cookie set failures in non-browser environments
+        }
+
         // Return user information
         ctx.body = {
             success: true,
@@ -205,7 +235,7 @@ router.post('/wxlogin', async (ctx) => {
                 userInfo: {
                     id: user._id,
                     nickName: user.name,
-                    avatarUrl: user.avatar,
+                    avatarUrl: normalizeUploadUrl(String(user.avatar || '')),
                     studentId: user.studentId,
                     creditScore: user.creditScore,
                     isBindStudentId: !!user.studentId,

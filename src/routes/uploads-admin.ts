@@ -3,7 +3,11 @@ import { authMiddleware, optionalAuthMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { ErrorCodes } from '../utils/error-codes';
 import { Upload } from '../models/mongodb';
-import { deleteUploadById, saveBase64Image, normalizeUploadUrl } from '../utils/upload';
+import {
+    deleteUploadById,
+    saveBase64Image,
+    normalizeUploadUrl,
+} from '../utils/upload';
 // fs/path no longer needed; deletion handled in utils/upload
 
 const router = new Router({ prefix: '/api/uploads' });
@@ -44,9 +48,15 @@ router.get('/', authMiddleware, async (ctx) => {
             .lean();
         const normalizedList = list.map((item: any) => ({
             ...item,
-            url: makeAbsoluteUrl(ctx, normalizeUploadUrl(String(item.url || ''))),
+            url: makeAbsoluteUrl(
+                ctx,
+                normalizeUploadUrl(String(item.url || ''))
+            ),
         }));
-        ctx.body = { success: true, data: { list: normalizedList, total, page: p, limit: l } };
+        ctx.body = {
+            success: true,
+            data: { list: normalizedList, total, page: p, limit: l },
+        };
     } catch (e: any) {
         if (e.isCustom) throw e;
         throw new CustomError('Failed to list uploads', 500);
@@ -67,7 +77,8 @@ const handleUpload = async (ctx: any) => {
         !!dataUrl,
         'dataUrlLength=',
         dataUrl ? dataUrl.length : 0,
-        'bodyKeys=', Object.keys(body || {}).join(', '),
+        'bodyKeys=',
+        Object.keys(body || {}).join(', ')
     );
     if (!dataUrl) ctx.throw(400, 'Missing dataUrl');
     const uploaderId = ctx.state?.user?.id;

@@ -2,9 +2,10 @@ import Router from 'koa-router';
 import { authMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { CreditRecord, Feedback, User } from '../models/mongodb';
-import { Seat } from '../models/mysql';
-import { saveBase64Image } from '../utils/upload';
+import { Floor, Seat } from '../models/mysql';
+import { normalizeUploadUrl, saveBase64Image } from '../utils/upload';
 import { ErrorCodes } from '../utils/error-codes';
+import { normalizeSeatStatus } from '../utils/seat-status';
 
 const router = new Router({ prefix: '/api/user' });
 
@@ -30,9 +31,14 @@ router.get('/profile', authMiddleware, async (ctx) => {
             throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
         }
 
+        const normalizedUser = user.toObject();
+        normalizedUser.avatar = normalizeUploadUrl(
+            String(normalizedUser.avatar || '')
+        );
+
         ctx.body = {
             success: true,
-            data: user,
+            data: normalizedUser,
         };
     } catch (error) {
         if (error instanceof CustomError) {
@@ -58,7 +64,7 @@ router.put('/profile', authMiddleware, async (ctx) => {
             // if avatar is base64 data URL, save to uploads and set url
             if (typeof avatar === 'string' && avatar.startsWith('data:')) {
                 try {
-                    const url = saveBase64Image(avatar);
+                    const url = await saveBase64Image(avatar, userId);
                     updateData.avatar = url;
                 } catch (e) {
                     console.error('Save avatar failed', e);
@@ -69,7 +75,10 @@ router.put('/profile', authMiddleware, async (ctx) => {
             }
         }
 
-        await User.updateById(userId, updateData);
+        await User.findByIdAndUpdate(userId, updateData, {
+            new: true,
+            runValidators: true,
+        });
 
         ctx.body = {
             success: true,
@@ -173,7 +182,7 @@ router.post('/favorite/:seatId', authMiddleware, async (ctx) => {
             user.favorites.splice(favoriteIndex, 1);
         } else {
             // 添加收藏
-            user.favorites.push(seatId);
+            (user.favorites as any).push(seatId);
         }
 
         await user.save();
@@ -209,12 +218,33 @@ router.get('/favorites', authMiddleware, async (ctx) => {
         const seatIds = user.favorites.map((id) => parseInt(id.toString()));
         const seats =
             seatIds.length > 0
-                ? await Seat.findAll({ where: { id: seatIds } })
+                ? await Seat.findAll({
+                      where: { id: seatIds },
+                      include: [
+                          {
+                              model: Floor,
+                              as: 'floor',
+                              attributes: ['id', 'name'],
+                          },
+                      ],
+                  })
                 : [];
 
         ctx.body = {
             success: true,
-            data: seats,
+            data: seats.map((seat: any) => ({
+                id: seat.id,
+                floorId: seat.floorId,
+                floorName: seat.floor?.name || '',
+                rowNum: seat.rowNum,
+                colNum: seat.colNum,
+                type: seat.type,
+                hasSocket: seat.hasSocket,
+                isWindow: seat.isWindow,
+                zone: seat.zone,
+                status: normalizeSeatStatus(seat.status),
+                description: seat.description,
+            })),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -255,6 +285,7 @@ router.get('/credit', authMiddleware, async (ctx) => {
             success: true,
             data: {
                 score: user.creditScore,
+                creditScore: user.creditScore,
                 level, // 返回数字等级
                 records: records.map((record) => ({
                     id: record._id,
@@ -392,11 +423,18 @@ router.get('/feedback/my', authMiddleware, async (ctx) => {
 router.get('/feedback/:id', authMiddleware, async (ctx) => {
     try {
         const feedbackId = ctx.params.id;
+        const userId = (ctx as any).state.user.id;
 
-        const feedback = await Feedback.findById(feedbackId);
+        const feedback = await Feedback.findOne({
+            _id: feedbackId,
+            userId,
+        });
 
         if (!feedback) {
-            throw new CustomError('反馈不存在', ErrorCodes.USER_NOT_FOUND);
+            throw new CustomError(
+                'Feedback not found',
+                ErrorCodes.USER_NOT_FOUND
+            );
         }
 
         ctx.body = {

@@ -11,12 +11,18 @@ async function ensureUser(col, { username, password, name, role }) {
   const existing = await col.findOne({ username });
   const hash = password ? await bcrypt.hash(password, 10) : null;
 
+  const normalizeRole = (r) => {
+    if (typeof r === 'number') return r;
+    if (typeof r === 'string') return r === 'admin' ? 1 : 0;
+    return 0;
+  };
+
   if (!existing) {
     const doc = {
       username,
       password: hash,
       name: name || username,
-      role: role || 'user',
+      role: normalizeRole(role),
       creditScore: 100,
       blacklisted: false,
       settings: {},
@@ -28,7 +34,7 @@ async function ensureUser(col, { username, password, name, role }) {
     const res = await col.insertOne(doc);
     return await col.findOne({ _id: res.insertedId });
   } else {
-    const update = { role: role || existing.role, updatedAt: now };
+    const update = { role: normalizeRole(role) ?? existing.role, updatedAt: now };
     if (hash) update.password = hash;
     if (name) update.name = name;
     await col.updateOne({ _id: existing._id }, { $set: update });
@@ -47,7 +53,7 @@ async function main() {
     username: 'guest',
     password: null, // guest has no password
     name: '游客',
-    role: 'guest',
+    role: 0,
   });
   console.log('Guest ensured:', guest.username);
 
@@ -57,7 +63,7 @@ async function main() {
     username: 'ray.zhang',
     password: adminPassword,
     name: 'Ray Zhang',
-    role: 'admin',
+    role: 1,
   });
   console.log('Admin ensured:', admin.username);
 

@@ -834,15 +834,30 @@ const allPaths = {
                                                         userId: {
                                                             type: 'string',
                                                         },
-                                                        changeAmount: {
+                                                        userName: {
+                                                            type: 'string',
+                                                        },
+                                                        userAvatar: {
+                                                            type: 'string',
+                                                        },
+                                                        type: {
+                                                            type: 'integer',
+                                                        },
+                                                        points: {
                                                             type: 'integer',
                                                         },
                                                         reason: {
                                                             type: 'string',
                                                         },
-                                                        createdAt: {
+                                                        date: {
                                                             type: 'string',
                                                             format: 'date-time',
+                                                        },
+                                                        updatedBy: {
+                                                            type: 'string',
+                                                        },
+                                                        updatedByName: {
+                                                            type: 'string',
                                                         },
                                                     },
                                                 },
@@ -1065,7 +1080,7 @@ const allPaths = {
     },
     '/api/seats/{id}': {
         get: {
-            tags: ['-seat 座位管理 (Seats)'],
+            tags: ['💺 座位管理 (Seats)'],
             summary: '获取座位详情',
             security: [{ bearerAuth: [] }],
             parameters: [
@@ -1571,6 +1586,24 @@ const allPaths = {
                                                         relatedId: {
                                                             type: 'string',
                                                         },
+                                                        userId: {
+                                                            type: 'string',
+                                                        },
+                                                        userAvatar: {
+                                                            type: 'string',
+                                                        },
+                                                        updatedBy: {
+                                                            type: 'string',
+                                                        },
+                                                        updatedByName: {
+                                                            type: 'string',
+                                                        },
+                                                        createdBy: {
+                                                            type: 'string',
+                                                        },
+                                                        createdByName: {
+                                                            type: 'string',
+                                                        },
                                                     },
                                                 },
                                             },
@@ -1736,6 +1769,18 @@ const allPaths = {
                                                             description:
                                                                 '是否已报名',
                                                         },
+                                                        createdBy: {
+                                                            type: 'string',
+                                                        },
+                                                        createdByName: {
+                                                            type: 'string',
+                                                        },
+                                                        updatedBy: {
+                                                            type: 'string',
+                                                        },
+                                                        updatedByName: {
+                                                            type: 'string',
+                                                        },
                                                     },
                                                 },
                                             },
@@ -1766,7 +1811,55 @@ const allPaths = {
                 },
             ],
             responses: {
-                200: { description: '获取成功' },
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            id: { type: 'string' },
+                                            title: { type: 'string' },
+                                            description: { type: 'string' },
+                                            coverImage: {
+                                                type: 'string',
+                                                format: 'uri',
+                                            },
+                                            startTime: {
+                                                type: 'string',
+                                                format: 'date-time',
+                                            },
+                                            endTime: {
+                                                type: 'string',
+                                                format: 'date-time',
+                                            },
+                                            location: { type: 'string' },
+                                            status: {
+                                                type: 'integer',
+                                                enum: [0, 1, 2],
+                                            },
+                                            participants: {
+                                                type: 'array',
+                                                items: { type: 'string' },
+                                            },
+                                            maxParticipants: {
+                                                type: 'integer',
+                                            },
+                                            createdBy: { type: 'string' },
+                                            createdByName: { type: 'string' },
+                                            updatedBy: { type: 'string' },
+                                            updatedByName: { type: 'string' },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
                 404: { description: '活动不存在' },
             },
         },
@@ -2021,6 +2114,12 @@ const allPaths = {
                                                             description:
                                                                 '创建时间',
                                                         },
+                                                        updatedBy: {
+                                                            type: 'string',
+                                                        },
+                                                        updatedByName: {
+                                                            type: 'string',
+                                                        },
                                                     },
                                                 },
                                             },
@@ -2174,6 +2273,8 @@ const allPaths = {
                                                 format: 'date-time',
                                                 description: '更新时间',
                                             },
+                                            updatedBy: { type: 'string' },
+                                            updatedByName: { type: 'string' },
                                         },
                                     },
                                 },

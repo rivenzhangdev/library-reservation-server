@@ -187,7 +187,7 @@ async function initializeMongoDB() {
                                 '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', // admin123
                             name: '管理员',
                             studentId: '000001',
-                            role: 'admin',
+                            role: 1,
                             creditScore: 100,
                         },
                         {
@@ -196,7 +196,7 @@ async function initializeMongoDB() {
                                 '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', // admin123
                             name: '测试用户 1',
                             studentId: '2024001',
-                            role: 'user',
+                            role: 0,
                             creditScore: 100,
                         },
                         {
@@ -205,7 +205,7 @@ async function initializeMongoDB() {
                                 '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', // admin123
                             name: '测试用户 2',
                             studentId: '2024002',
-                            role: 'user',
+                            role: 0,
                             creditScore: 100,
                         },
                     ]);
@@ -248,7 +248,7 @@ async function initializeMongoDB() {
                     ]);
 
                     // 创建测试通知
-                    const users = await User.find({ role: 'user' });
+                    const users = await User.find({ role: 0 });
                     if (users.length > 0) {
                         await Notification.create([
                             {

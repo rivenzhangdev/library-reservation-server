@@ -11,6 +11,8 @@ interface BookingAttributes {
     startTime?: Date;
     endTime?: Date;
     status: BookingStatus;
+    createdBy?: string | null;
+    updatedBy?: string | null;
 }
 
 interface BookingCreationAttributes
@@ -31,6 +33,8 @@ class Booking
     public startTime!: Date;
     public endTime!: Date;
     public status!: BookingStatus;
+    public createdBy!: string | null;
+    public updatedBy!: string | null;
 }
 
 Booking.init(
@@ -76,6 +80,18 @@ Booking.init(
             defaultValue: BookingStatus.UPCOMING,
             comment:
                 '预约状态 (0:待使用，1:进行中，2:已完成，3:已取消，4:违约)',
+        },
+        createdBy: {
+            type: DataTypes.STRING(255),
+            allowNull: true,
+            field: 'created_by',
+            comment: '创建者 (audit)',
+        },
+        updatedBy: {
+            type: DataTypes.STRING(255),
+            allowNull: true,
+            field: 'updated_by',
+            comment: '更新者 (audit)',
         },
     },
     {

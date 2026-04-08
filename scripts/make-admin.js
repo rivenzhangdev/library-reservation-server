@@ -26,7 +26,7 @@ async function main() {
       username,
       password: username,
       name: 'Admin',
-      role: 'admin',
+      role: 1,
       creditScore: 100,
       blacklisted: false,
       settings: {},
@@ -38,7 +38,7 @@ async function main() {
     const res = await col.insertOne(doc);
     user = await col.findOne({ _id: res.insertedId });
   } else {
-    await col.updateOne({ _id: user._id }, { $set: { role: 'admin', updatedAt: new Date() } });
+    await col.updateOne({ _id: user._id }, { $set: { role: 1, updatedAt: new Date() } });
     user = await col.findOne({ _id: user._id });
   }
 

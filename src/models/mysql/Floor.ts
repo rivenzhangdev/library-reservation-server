@@ -6,6 +6,8 @@ interface FloorAttributes {
     name: string;
     description?: string;
     totalSeats: number;
+    createdBy?: string | null;
+    updatedBy?: string | null;
 }
 
 interface FloorCreationAttributes
@@ -19,6 +21,8 @@ class Floor
     public name!: string;
     public description!: string;
     public totalSeats!: number;
+    public createdBy!: string | null;
+    public updatedBy!: string | null;
 }
 
 Floor.init(
@@ -42,6 +46,18 @@ Floor.init(
             type: DataTypes.INTEGER,
             defaultValue: 0,
             comment: '总座位数',
+        },
+        createdBy: {
+            type: DataTypes.STRING(255),
+            allowNull: true,
+            field: 'created_by',
+            comment: '创建者 (audit)',
+        },
+        updatedBy: {
+            type: DataTypes.STRING(255),
+            allowNull: true,
+            field: 'updated_by',
+            comment: '更新者 (audit)',
         },
     },
     {

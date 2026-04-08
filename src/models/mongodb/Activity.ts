@@ -13,6 +13,7 @@ export interface IActivity extends Document {
     rules: string;
     awards: string;
     createdBy: mongoose.Types.ObjectId;
+    updatedBy?: mongoose.Types.ObjectId;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -35,6 +36,7 @@ const activitySchema = new Schema<IActivity>(
         rules: String,
         awards: String,
         createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+        updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     },
     {
         timestamps: true,

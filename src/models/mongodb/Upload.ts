@@ -6,6 +6,7 @@ export interface IUpload extends Document {
     mime?: string;
     size?: number;
     uploaderId?: mongoose.Types.ObjectId | string;
+    uploaderName?: string;
     refType?: string; // e.g. 'feedback', 'user'
     refId?: string;
     createdAt: Date;
@@ -19,6 +20,7 @@ const uploadSchema = new Schema<IUpload>(
         mime: String,
         size: Number,
         uploaderId: { type: Schema.Types.ObjectId, ref: 'User' },
+        uploaderName: String,
         refType: String,
         refId: String,
     },

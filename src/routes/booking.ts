@@ -1,7 +1,7 @@
 import Router from 'koa-router';
 import { authMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
-import { Notification } from '../models/mongodb';
+import { Notification, User } from '../models/mongodb';
 import { Booking, Floor, Seat, TimeSlotStatus } from '../models/mysql';
 import { BookingStatus, TimeSlotStatusValue } from '../models/mysql/types';
 import { ErrorCodes } from '../utils/error-codes';
@@ -64,7 +64,7 @@ router.post('/', authMiddleware, async (ctx) => {
             );
         }
 
-        // Create booking
+        // Create booking (server-authoritative audit fields)
         const booking = await Booking.create({
             userId: userId.toString(),
             seatId,
@@ -73,6 +73,8 @@ router.post('/', authMiddleware, async (ctx) => {
             startTime,
             endTime,
             status: BookingStatus.UPCOMING, // 使用数字枚举
+            createdBy: userId.toString(),
+            updatedBy: userId.toString(),
         });
 
         // Update time slot status
@@ -94,11 +96,26 @@ router.post('/', authMiddleware, async (ctx) => {
         // Create notification
         await Notification.create({
             userId,
+            createdBy: userId,
             type: 1, // NotificationType.BOOKING
             title: 'Booking successful',
             content: `You have successfully booked a seat on ${date}`,
             relatedId: booking.id.toString(),
+            updatedBy: userId,
         });
+
+        // try fetch createdBy display name
+        let createdByName: string | undefined = undefined;
+        try {
+            if (booking.createdBy) {
+                const cb = await User.findById(booking.createdBy)
+                    .select('name username')
+                    .lean();
+                if (cb) createdByName = cb.username || cb.name;
+            }
+        } catch (e) {
+            // ignore lookup errors
+        }
 
         ctx.body = {
             success: true,
@@ -108,6 +125,8 @@ router.post('/', authMiddleware, async (ctx) => {
                 date: booking.date,
                 timeSlot: booking.timeSlot,
                 status: booking.status,
+                createdBy: booking.createdBy,
+                createdByName,
             },
         };
     } catch (error: any) {
@@ -165,6 +184,9 @@ router.get('/my', authMiddleware, async (ctx) => {
             colNum: (booking as any).seat?.colNum ?? 0,
             zone: (booking as any).seat?.zone ?? '',
             type: (booking as any).seat?.type ?? '',
+            description: (booking as any).seat?.description ?? '',
+            hasSocket: !!(booking as any).seat?.hasSocket,
+            isWindow: !!(booking as any).seat?.isWindow,
             date: booking.date,
             timeSlot: booking.timeSlot,
             startTime: booking.startTime,
@@ -214,7 +236,10 @@ router.delete('/:id', authMiddleware, async (ctx) => {
         }
 
         // Update booking status
-        await booking.update({ status: BookingStatus.CANCELED }); // 使用数字枚举
+        await booking.update({
+            status: BookingStatus.CANCELED,
+            updatedBy: userId.toString(),
+        }); // 使用数字枚举
 
         // Release time slot
         await TimeSlotStatus.update(
@@ -274,7 +299,10 @@ router.post('/checkin/:id', authMiddleware, async (ctx) => {
         // TODO: Validate location information
 
         // Update booking status
-        await booking.update({ status: BookingStatus.ONGOING });
+        await booking.update({
+            status: BookingStatus.ONGOING,
+            updatedBy: userId.toString(),
+        });
 
         ctx.body = {
             success: true,
@@ -283,6 +311,53 @@ router.post('/checkin/:id', authMiddleware, async (ctx) => {
         if (error.isCustom) throw error;
         throw new CustomError(
             'Check-in failed',
+            ErrorCodes.CHECKIN_NOT_ALLOWED
+        );
+    }
+});
+
+/**
+ * @route POST /api/booking/checkout/:id
+ * @desc Booking check-out interface
+ */
+router.post('/checkout/:id', authMiddleware, async (ctx) => {
+    try {
+        const bookingId = ctx.params.id;
+        const userId = (ctx as any).state.user.id;
+
+        const booking = await Booking.findOne({
+            where: {
+                id: bookingId,
+                userId: userId.toString(),
+            },
+        });
+
+        if (!booking) {
+            throw new CustomError(
+                'Booking not found',
+                ErrorCodes.BOOKING_NOT_FOUND
+            );
+        }
+
+        if (booking.status !== BookingStatus.ONGOING) {
+            throw new CustomError(
+                'Check-out is not allowed for this booking',
+                ErrorCodes.CHECKIN_NOT_ALLOWED
+            );
+        }
+
+        await booking.update({
+            status: BookingStatus.COMPLETED,
+            updatedBy: userId.toString(),
+        });
+
+        ctx.body = {
+            success: true,
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Check-out failed',
             ErrorCodes.CHECKIN_NOT_ALLOWED
         );
     }
@@ -344,6 +419,8 @@ router.post('/renew/:id', authMiddleware, async (ctx) => {
             startTime: booking.startTime,
             endTime: booking.endTime,
             status: BookingStatus.UPCOMING,
+            createdBy: userId.toString(),
+            updatedBy: userId.toString(),
         });
 
         // Mark the new time slot as booked
@@ -400,6 +477,22 @@ router.get('/:id', authMiddleware, async (ctx) => {
             );
         }
 
+        // fetch user display names for createdBy/updatedBy if present
+        const userIdsToFetch: string[] = [];
+        if (booking.userId) userIdsToFetch.push(booking.userId.toString());
+        if ((booking as any).createdBy)
+            userIdsToFetch.push((booking as any).createdBy);
+        if ((booking as any).updatedBy)
+            userIdsToFetch.push((booking as any).updatedBy);
+        const uniq = Array.from(new Set(userIdsToFetch));
+        const users = uniq.length
+            ? await User.find({ _id: { $in: uniq } }).select('name username')
+            : [];
+        const userMap: Record<string, any> = {};
+        users.forEach((u: any) => {
+            userMap[u._id.toString()] = u;
+        });
+
         ctx.body = {
             success: true,
             data: {
@@ -410,6 +503,9 @@ router.get('/:id', authMiddleware, async (ctx) => {
                 colNum: (booking as any).seat?.colNum ?? 0,
                 zone: (booking as any).seat?.zone ?? '',
                 type: (booking as any).seat?.type ?? '',
+                description: (booking as any).seat?.description ?? '',
+                hasSocket: !!(booking as any).seat?.hasSocket,
+                isWindow: !!(booking as any).seat?.isWindow,
                 date: booking.date,
                 timeSlot: booking.timeSlot,
                 startTime: booking.startTime,
@@ -417,6 +513,20 @@ router.get('/:id', authMiddleware, async (ctx) => {
                 status: booking.status,
                 createdAt: (booking as any).created_at,
                 updatedAt: (booking as any).updated_at,
+                userName:
+                    userMap[booking.userId]?.username ||
+                    userMap[booking.userId]?.name ||
+                    booking.userId,
+                createdBy: (booking as any).createdBy,
+                createdByName:
+                    userMap[(booking as any).createdBy]?.username ||
+                    userMap[(booking as any).createdBy]?.name ||
+                    undefined,
+                updatedBy: (booking as any).updatedBy,
+                updatedByName:
+                    userMap[(booking as any).updatedBy]?.username ||
+                    userMap[(booking as any).updatedBy]?.name ||
+                    undefined,
             },
         };
     } catch (error: any) {

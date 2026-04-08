@@ -2,6 +2,8 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface INotification extends Document {
     userId: mongoose.Types.ObjectId;
+    createdBy?: mongoose.Types.ObjectId;
+    updatedBy?: mongoose.Types.ObjectId;
     type: number; // 0: system, 1: booking, 2: activity, 3: marketing
     title: string;
     content: string;
@@ -24,6 +26,8 @@ const notificationSchema = new Schema<INotification>(
         time: { type: Date, default: Date.now },
         isRead: { type: Boolean, default: false },
         relatedId: String,
+        updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+        createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
         data: Schema.Types.Mixed,
     },
     {

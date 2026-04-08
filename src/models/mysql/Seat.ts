@@ -13,6 +13,8 @@ interface SeatAttributes {
     isWindow: boolean;
     zone?: string;
     description?: string;
+    createdBy?: string | null;
+    updatedBy?: string | null;
 }
 
 interface SeatCreationAttributes
@@ -25,6 +27,8 @@ interface SeatCreationAttributes
         | 'isWindow'
         | 'zone'
         | 'description'
+        | 'createdBy'
+        | 'updatedBy'
     > {}
 
 class Seat
@@ -41,6 +45,8 @@ class Seat
     public isWindow!: boolean;
     public zone!: string;
     public description!: string;
+    public createdBy!: string | null;
+    public updatedBy!: string | null;
 }
 
 Seat.init(
@@ -96,6 +102,18 @@ Seat.init(
         description: {
             type: DataTypes.TEXT,
             comment: '座位描述',
+        },
+        createdBy: {
+            type: DataTypes.STRING(255),
+            allowNull: true,
+            field: 'created_by',
+            comment: '创建者 (audit)',
+        },
+        updatedBy: {
+            type: DataTypes.STRING(255),
+            allowNull: true,
+            field: 'updated_by',
+            comment: '更新者 (audit)',
         },
     },
     {

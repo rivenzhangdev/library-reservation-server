@@ -15,6 +15,7 @@ export interface IFeedback extends Document {
     repliedBy?: mongoose.Types.ObjectId;
     replyAt?: Date;
     processedBy?: mongoose.Types.ObjectId;
+    updatedBy?: mongoose.Types.ObjectId;
     processedAt?: Date;
     processedReason?: string;
     comments?: Array<{
@@ -58,6 +59,7 @@ const feedbackSchema = new Schema<IFeedback>(
         repliedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         replyAt: Date,
         processedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+        updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         processedAt: Date,
         processedReason: String,
         comments: [

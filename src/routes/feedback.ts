@@ -1,5 +1,9 @@
 import Router from 'koa-router';
-import { authMiddleware, optionalAuthMiddleware } from '../middleware/auth';
+import {
+    adminMiddleware,
+    authMiddleware,
+    optionalAuthMiddleware,
+} from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { Feedback, User } from '../models/mongodb';
 import { Roles } from '../constants/roles';
@@ -117,7 +121,7 @@ router.post('/', optionalAuthMiddleware, async (ctx) => {
 
         const feedbackWithUser = await Feedback.findById(feedback._id).populate(
             'userId',
-            'name avatar studentId'
+            'name avatar studentId username'
         );
 
         ctx.body = {
@@ -226,14 +230,8 @@ router.get('/my', authMiddleware, async (ctx) => {
  * @desc 管理员获取全部反馈（分页）
  * 权限：仅 `admin` 可访问
  */
-router.get('/list', authMiddleware, async (ctx) => {
+router.get('/list', authMiddleware, adminMiddleware, async (ctx) => {
     try {
-        const userId = (ctx as any).state.user.id;
-        const user = await User.findById(userId);
-        if (user?.role !== Roles.ADMIN) {
-            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
-        }
-
         const page = parseInt((ctx.query.page as string) || '1');
         const limit = parseInt((ctx.query.limit as string) || '20');
 
@@ -243,15 +241,16 @@ router.get('/list', authMiddleware, async (ctx) => {
             .sort({ createdAt: -1 })
             .skip((page - 1) * limit)
             .limit(limit)
-            .populate('userId', 'name avatar studentId')
+            .populate('userId', 'name avatar studentId username')
+            .populate('updatedBy', 'name username')
             .select(
-                'id userId typeId typeName urgencyId urgencyName title description images status reply replyAt createdAt'
+                'id userId typeId typeName urgencyId urgencyName title description images status reply replyAt createdAt updatedBy'
             );
 
         ctx.body = {
             success: true,
             data: {
-                feedbacks: feedbacks.map((fb) => ({
+                feedbacks: feedbacks.map((fb: any) => ({
                     id: fb._id,
                     userId: fb.userId,
                     typeId: fb.typeId,
@@ -265,6 +264,11 @@ router.get('/list', authMiddleware, async (ctx) => {
                     reply: fb.reply,
                     replyAt: fb.replyAt,
                     createdAt: fb.createdAt,
+                    updatedBy: fb.updatedBy?._id || fb.updatedBy,
+                    updatedByName:
+                        fb.updatedBy?.username ||
+                        fb.updatedBy?.name ||
+                        undefined,
                 })),
                 total,
                 page,
@@ -315,11 +319,12 @@ router.get('/list', authMiddleware, async (ctx) => {
 router.get('/:id', authMiddleware, async (ctx) => {
     try {
         const userId = (ctx as any).state.user.id;
+        const currentUser = (ctx as any).state.user;
         const feedbackId = ctx.params.id;
 
         const feedback = await Feedback.findById(feedbackId).populate(
             'userId',
-            'name avatar studentId'
+            'name avatar studentId username'
         );
 
         if (!feedback) {
@@ -330,12 +335,27 @@ router.get('/:id', authMiddleware, async (ctx) => {
         }
 
         // 权限检查：只能查看自己的反馈（管理员除外）
-        const user = await User.findById(userId);
-        if (
-            feedback.userId._id.toString() !== userId &&
-            user?.role !== Roles.ADMIN
-        ) {
+        const ownerId =
+            typeof feedback.userId === 'object' && (feedback.userId as any)?._id
+                ? String((feedback.userId as any)._id)
+                : String(feedback.userId || '');
+        if (ownerId !== userId && currentUser?.role !== Roles.ADMIN) {
             throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
+        }
+
+        let updatedByName: string | undefined;
+        let updatedByValue: any = feedback.updatedBy;
+        if (feedback.updatedBy) {
+            try {
+                const updatedByUser = await User.findById(feedback.updatedBy)
+                    .select('name username')
+                    .lean();
+                updatedByName =
+                    updatedByUser?.username || updatedByUser?.name || undefined;
+                updatedByValue = updatedByUser?._id || feedback.updatedBy;
+            } catch (error) {
+                // ignore audit lookup errors
+            }
         }
 
         ctx.body = {
@@ -357,6 +377,8 @@ router.get('/:id', authMiddleware, async (ctx) => {
                 comments: feedback.comments || [],
                 createdAt: feedback.createdAt,
                 updatedAt: feedback.updatedAt,
+                updatedBy: updatedByValue,
+                updatedByName,
             },
         };
     } catch (error: any) {
@@ -374,13 +396,10 @@ router.get('/:id', authMiddleware, async (ctx) => {
  * @desc 管理员处理反馈（更新 status、reply）
  * 权限：admin
  */
-router.put('/:id', authMiddleware, async (ctx) => {
+router.put('/:id', authMiddleware, adminMiddleware, async (ctx) => {
     try {
         const userId = (ctx as any).state.user.id;
         const user = await User.findById(userId);
-        if (user?.role !== Roles.ADMIN) {
-            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
-        }
 
         const id = ctx.params.id;
         const { status, reply } = ctx.request.body as any;
@@ -399,6 +418,13 @@ router.put('/:id', authMiddleware, async (ctx) => {
             feedback.replyAt = new Date();
             feedback.processedBy = user._id;
             feedback.processedAt = new Date();
+        }
+
+        // mark updatedBy for audit
+        try {
+            if (user && user._id) feedback.updatedBy = user._id;
+        } catch (e) {
+            // ignore
         }
 
         await feedback.save();
@@ -424,13 +450,10 @@ router.put('/:id', authMiddleware, async (ctx) => {
  * @desc 更新反馈状态（管理员）
  * body: { status: string, reason?: string }
  */
-router.put('/status/:id', authMiddleware, async (ctx) => {
+router.put('/status/:id', authMiddleware, adminMiddleware, async (ctx) => {
     try {
         const userId = (ctx as any).state.user.id;
         const user = await User.findById(userId);
-        if (user?.role !== Roles.ADMIN) {
-            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
-        }
 
         const id = ctx.params.id;
         const { status, reason } = ctx.request.body as any;
@@ -447,6 +470,13 @@ router.put('/status/:id', authMiddleware, async (ctx) => {
             feedback.processedReason = reason;
             feedback.processedBy = user._id;
             feedback.processedAt = new Date();
+        }
+
+        // mark updatedBy
+        try {
+            if (user && user._id) feedback.updatedBy = user._id;
+        } catch (e) {
+            // Ignore errors when setting updatedBy
         }
 
         await feedback.save();
@@ -490,7 +520,7 @@ router.post('/comment/:id', authMiddleware, async (ctx) => {
                 ErrorCodes.FEEDBACK_NOT_FOUND
             );
 
-        const opName = operator || user?.name || 'system';
+        const opName = operator || user?.username || user?.name || 'system';
         const isOfficial = user?.role === Roles.ADMIN;
 
         const comment = {
@@ -501,6 +531,13 @@ router.post('/comment/:id', authMiddleware, async (ctx) => {
         };
         feedback.comments = feedback.comments || [];
         feedback.comments.push(comment as any);
+
+        // mark updatedBy when a user/admin comments
+        try {
+            if (user && user._id) feedback.updatedBy = user._id;
+        } catch (e) {
+            // Ignore errors when setting updatedBy
+        }
 
         await feedback.save();
 
@@ -528,13 +565,9 @@ router.post('/comment/:id', authMiddleware, async (ctx) => {
  * @desc 管理员删除反馈中的图片（仅移除与反馈的关联，文件与 Upload 元数据保留供管理员在“上传管理”中确认删除）
  * body: { url: string }
  */
-router.delete('/image/:id', authMiddleware, async (ctx) => {
+router.delete('/image/:id', authMiddleware, adminMiddleware, async (ctx) => {
     try {
         const userId = (ctx as any).state.user.id;
-        const user = await User.findById(userId);
-        if (user?.role !== Roles.ADMIN) {
-            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
-        }
 
         const id = ctx.params.id;
         const { url } = ctx.request.body as any;
@@ -549,6 +582,13 @@ router.delete('/image/:id', authMiddleware, async (ctx) => {
             );
 
         feedback.images = (feedback.images || []).filter((u) => u !== url);
+        // set updatedBy to the admin performing deletion
+        try {
+            const user = await User.findById(userId);
+            if (user && user._id) feedback.updatedBy = user._id;
+        } catch (e) {
+            // Ignore errors when setting updatedBy
+        }
         await feedback.save();
 
         // 不要立即删除文件或元数据：仅解除该 Upload 与反馈的关联（清空 refType/refId），
@@ -580,14 +620,8 @@ router.delete('/image/:id', authMiddleware, async (ctx) => {
  * @desc 导出反馈为 CSV
  * query: format=csv|excel (default csv), status, startDate, endDate
  */
-router.get('/export', authMiddleware, async (ctx) => {
+router.get('/export', authMiddleware, adminMiddleware, async (ctx) => {
     try {
-        const userId = (ctx as any).state.user.id;
-        const user = await User.findById(userId);
-        if (user?.role !== Roles.ADMIN) {
-            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
-        }
-
         const format = (ctx.query.format as string) || 'csv';
         const status = ctx.query.status as string | undefined;
         const startDate = ctx.query.startDate as string | undefined;
@@ -600,7 +634,7 @@ router.get('/export', authMiddleware, async (ctx) => {
         if (endDate) filter.createdAt.$lte = new Date(endDate);
 
         const feedbacks = await Feedback.find(filter)
-            .populate('userId', 'name studentId avatar')
+            .populate('userId', 'name studentId avatar username')
             .sort({ createdAt: -1 });
 
         // Build CSV
@@ -626,7 +660,7 @@ router.get('/export', authMiddleware, async (ctx) => {
             fb.urgencyName || fb.urgencyId || '',
             fb.status,
             fb.userId?._id?.toString() || '',
-            fb.userId?.name || '',
+            fb.userId?.username || fb.userId?.name || '',
             fb.userId?.studentId || '',
             fb.createdAt ? fb.createdAt.toISOString() : '',
         ]);

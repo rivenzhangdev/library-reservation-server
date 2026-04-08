@@ -17,6 +17,19 @@ try {
 // 获取 swagger-ui-dist 的路径
 const swaggerUiAssetPath = require('swagger-ui-dist').getAbsoluteFSPath();
 
+// 配置：默认仅绑定到本地回环地址以避免被外网访问，可通过 SWAGGER_HOST 覆盖
+const SWAGGER_HOST = process.env.SWAGGER_HOST || '127.0.0.1';
+// 可选 Basic Auth，若同时设置 SWAGGER_USER 和 SWAGGER_PASS，则要求访问时提供 Basic Auth
+const SWAGGER_USER = process.env.SWAGGER_USER || '';
+const SWAGGER_PASS = process.env.SWAGGER_PASS || '';
+// 在生产环境下默认禁止启动此工具，除非显式设置 SWAGGER_ENABLE=true
+const SWAGGER_ENABLE = process.env.SWAGGER_ENABLE === 'true';
+
+if (process.env.NODE_ENV === 'production' && !SWAGGER_ENABLE) {
+    console.error('Swagger UI server is disabled in production by default. Set SWAGGER_ENABLE=true to override.');
+    process.exit(1);
+}
+
 // 计算 Swagger 端口：优先使用 SWAGGER_PORT 环境变量；若未设置，则使用应用端口 PORT + 1000；若两者都未设置，默认 4000
 let envSwagger = process.env.SWAGGER_PORT ? parseInt(process.env.SWAGGER_PORT, 10) : NaN;
 let envAppPort = process.env.PORT ? parseInt(process.env.PORT, 10) : NaN;
@@ -128,6 +141,31 @@ function startServer(port) {
     const server = http.createServer((req, res) => {
         console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
 
+        // 若设置了 Basic Auth 凭证，则对所有请求强制校验
+        if (SWAGGER_USER && SWAGGER_PASS) {
+            const auth = (req.headers['authorization'] || '');
+            if (!auth.startsWith('Basic ')) {
+                res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Swagger UI"' });
+                res.end('Unauthorized');
+                return;
+            }
+            try {
+                const creds = Buffer.from(auth.slice(6), 'base64').toString('utf8');
+                const idx = creds.indexOf(':');
+                const user = idx >= 0 ? creds.slice(0, idx) : creds;
+                const pass = idx >= 0 ? creds.slice(idx + 1) : '';
+                if (user !== SWAGGER_USER || pass !== SWAGGER_PASS) {
+                    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Swagger UI"' });
+                    res.end('Unauthorized');
+                    return;
+                }
+            } catch (e) {
+                res.writeHead(400, {});
+                res.end('Bad Authorization header');
+                return;
+            }
+        }
+
         // 处理 Swagger JSON 文件（优先使用完整版）
         if (req.url === '/swagger.json' || req.url === '/swagger-full.json') {
             // 尝试从当前 scripts 目录读取 swagger-full.json，若不存在则回退到上级目录（项目根目录）
@@ -178,6 +216,44 @@ function startServer(port) {
             }
         }
 
+        // 提供错误码 JSON（从 src/utils/error-codes.ts 解析）
+        if (req.url === '/error-codes' || req.url === '/error-codes.json') {
+            const candidatePaths = [
+                path.join(__dirname, '..', 'src', 'utils', 'error-codes.ts'),
+                path.join(__dirname, '..', 'src', 'utils', 'error-codes.js')
+            ];
+            let codesPath = null;
+            for (const p of candidatePaths) {
+                if (fs.existsSync(p)) { codesPath = p; break; }
+            }
+            if (!codesPath) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'error-codes file not found' }));
+                return;
+            }
+
+            try {
+                const content = fs.readFileSync(codesPath, 'utf8');
+                const m = content.match(/export\s+const\s+ErrorCodes\s*=\s*\{([\s\S]*?)\}\s*as\s*const/) || content.match(/export\s+const\s+ErrorCodes\s*=\s*\{([\s\S]*?)\}\s*;/);
+                const body = m ? m[1] : '';
+                const lines = body.split(/\r?\n/);
+                const codes = [];
+                for (let line of lines) {
+                    const lm = line.match(/\s*([A-Z0-9_]+)\s*:\s*([0-9]+)\s*,?\s*(?:\/\/\s*(.*))?/);
+                    if (lm) {
+                        codes.push({ key: lm[1], code: Number(lm[2]), desc: lm[3] ? lm[3].trim() : '' });
+                    }
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ codes }));
+                return;
+            } catch (err) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: err.message }));
+                return;
+            }
+        }
+
         // 处理 Swagger UI 资源
         if (req.url.startsWith('/swagger-ui/')) {
             const resourcePath = req.url.replace('/swagger-ui/', '');
@@ -191,12 +267,12 @@ function startServer(port) {
         res.end('Not Found');
     });
 
-    server.listen(port, () => {
+    server.listen(port, SWAGGER_HOST, () => {
         console.log('\n========================================');
         console.log('  🚀 Swagger UI 服务器已启动!');
         console.log('========================================');
-        console.log(`\n📖 访问地址：http://localhost:${port}`);
-        console.log(`📄 API 文档：http://localhost:${port}/swagger-full.json`);
+        console.log(`\n📖 访问地址：http://${SWAGGER_HOST}:${port}`);
+        console.log(`📄 API 文档：http://${SWAGGER_HOST}:${port}/swagger-full.json`);
 
         if (port !== PORT) {
             console.log(

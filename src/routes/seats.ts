@@ -2,7 +2,14 @@ import Router from 'koa-router';
 import { Op } from 'sequelize';
 import { CustomError } from '../middleware/error';
 import { Floor, Seat, TimeSlotStatus } from '../models/mysql';
+import { compareFloorName } from '../utils/floor-order';
 import { ErrorCodes } from '../utils/error-codes';
+import {
+    assignTimeSlotStatus,
+    createTimeSlotStatusMap,
+    getSeatAvailabilityStatus,
+    normalizeSeatStatus,
+} from '../utils/seat-status';
 
 const router = new Router({ prefix: '/api/seats' });
 
@@ -15,10 +22,13 @@ router.get('/floors', async (ctx) => {
         const floors = await Floor.findAll({
             attributes: ['id', 'name', 'description', 'totalSeats'],
         });
+        const sortedFloors = [...floors].sort((a, b) =>
+            compareFloorName(a.name, b.name)
+        );
 
         ctx.body = {
             success: true,
-            data: floors.map((floor) => ({
+            data: sortedFloors.map((floor) => ({
                 id: floor.id,
                 name: floor.name,
                 description: floor.description,
@@ -94,7 +104,10 @@ router.get('/floor/:floorId', async (ctx) => {
                     hasSocket: seat.hasSocket,
                     isWindow: seat.isWindow,
                     zone: seat.zone,
-                    status: status?.status ?? 'available',
+                    status: getSeatAvailabilityStatus(
+                        seat.status,
+                        status?.status
+                    ),
                     description: seat.description,
                 });
             }
@@ -107,7 +120,7 @@ router.get('/floor/:floorId', async (ctx) => {
                 hasSocket: seat.hasSocket,
                 isWindow: seat.isWindow,
                 zone: seat.zone,
-                status: seat.status,
+                status: normalizeSeatStatus(seat.status),
                 description: seat.description,
             }));
         }
@@ -143,11 +156,26 @@ router.get('/search', async (ctx) => {
         }
 
         // 模糊搜索座位
+        const keywordLike = `%${keyword}%`;
         const seats = await Seat.findAll({
             where: {
-                description: {
-                    [Op.like]: `%${keyword}%`,
-                },
+                [Op.or]: [
+                    {
+                        description: {
+                            [Op.like]: keywordLike,
+                        },
+                    },
+                    {
+                        zone: {
+                            [Op.like]: keywordLike,
+                        },
+                    },
+                    {
+                        '$floor.name$': {
+                            [Op.like]: keywordLike,
+                        },
+                    },
+                ],
             },
             include: [
                 {
@@ -160,7 +188,7 @@ router.get('/search', async (ctx) => {
 
         const results = await Promise.all(
             seats.map(async (seat) => {
-                let status = 'available';
+                let status = getSeatAvailabilityStatus(seat.status);
 
                 if (date && timeSlot) {
                     const slotStatus = await TimeSlotStatus.findOne({
@@ -170,7 +198,10 @@ router.get('/search', async (ctx) => {
                             timeSlot,
                         },
                     });
-                    status = slotStatus?.status ?? 'available';
+                    status = getSeatAvailabilityStatus(
+                        seat.status,
+                        slotStatus?.status
+                    );
                 }
 
                 return {
@@ -182,6 +213,7 @@ router.get('/search', async (ctx) => {
                     isWindow: seat.isWindow,
                     zone: seat.zone,
                     floorName: (seat as any).floor?.name,
+                    description: seat.description,
                     status,
                 };
             })
@@ -245,14 +277,14 @@ router.get('/:id', async (ctx) => {
                 },
             });
 
-            result.timeSlotStatus = {
-                morning: 'available',
-                afternoon: 'available',
-                evening: 'available',
-            };
+            result.timeSlotStatus = createTimeSlotStatusMap(seat.status);
 
             statuses.forEach((status) => {
-                result.timeSlotStatus[status.timeSlot] = status.status;
+                assignTimeSlotStatus(
+                    result.timeSlotStatus,
+                    status.timeSlot,
+                    status.status
+                );
             });
         }
 

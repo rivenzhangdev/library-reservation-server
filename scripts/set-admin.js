@@ -6,7 +6,7 @@ async function run() {
   await mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
   console.log('Connected to', MONGO_URI);
   const users = mongoose.connection.collection('users');
-  const res = await users.updateOne({ username: 'ray.zhang' }, { $set: { role: 'admin' } }, { upsert: false });
+  const res = await users.updateOne({ username: 'ray.zhang' }, { $set: { role: 1 } }, { upsert: false });
   console.log('MatchedCount:', res.matchedCount || res.matched || res.result);
   console.log('ModifiedCount:', res.modifiedCount || res.modified || res.result);
   await mongoose.disconnect();

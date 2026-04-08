@@ -6,87 +6,342 @@
     <title>图书馆座位预约系统 - API 文档</title>
     <link rel="stylesheet" type="text/css" href="/swagger-ui/swagger-ui.css" />
     <style>
-        html {
-            box-sizing: border-box;
-            overflow: -moz-scrollbars-vertical;
-            overflow-y: scroll;
-        }
-        
-        *, *:before, *:after {
-            box-sizing: inherit;
-        }
-        
-        body {
-            margin: 0;
-            background: #fafafa;
-        }
-        
-        .topbar {
-            display: none;
-        }
-        
-        .info {
-            margin: 20px 0;
-        }
-        
-        .info h1 {
-            color: #667eea !important;
-        }
-        
-        .swagger-ui .topbar {
-            display: none;
-        }
+        html { box-sizing: border-box; overflow-y: scroll; }
+        *, *:before, *:after { box-sizing: inherit; }
+        body { margin: 0; background: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; }
+        .topbar { display: none; }
+        .header { padding: 14px 20px; border-bottom: 1px solid #e6e6e6; background: #fff; display:flex; align-items:center; gap:12px }
+        .header h1 { margin: 0; font-size:16px; color:#111827 }
+        .tabs { display:flex; gap:8px; padding:12px 20px; background:transparent; border-bottom:1px solid #e6e6e6; overflow:auto }
+        .tab-btn { padding:8px 14px; border-radius:8px; background: #f3f4f6; cursor:pointer; color:#111827; border:1px solid transparent; font-weight:600 }
+        .tab-btn.active { background:#1f6feb; color:#fff; border-color: #1e40af }
+        .tab-content { padding:18px 20px; background:transparent; min-height:60vh }
+        .swagger-container { min-height:60vh }
+        .spinner { color:#6b7280 }
+        /* Intro markdown styles: white card for readability; width 100% and lighter code blocks */
+        .intro { color:#0f172a; line-height:1.7; background:#ffffff; padding:18px; border-radius:10px; box-shadow:0 1px 0 rgba(15,23,42,0.04); max-width:none; width:100%; margin:10px 0; font-size:15px }
+        .intro h1, .intro h2, .intro h3 { color:#0b1220; margin-top:1rem }
+        .intro p, .intro li { color:#374151 }
+        .intro a { color:#2563eb }
+        .intro pre { background:#f1f5f9; color:#0f172a; padding:14px; border-radius:8px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', 'Courier New', monospace; font-size:13px; border:1px solid #e6eef6 }
+        .intro code { background:#f3f4f6; color:#0b1220; padding:2px 6px; border-radius:6px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', monospace }
+        .intro table { border-collapse:collapse; width:100%; margin-top:10px }
+        .intro table th, .intro table td { border:1px solid #e6eef6; padding:8px; text-align:left }
+        .intro img { max-width:100%; height:auto; border-radius:6px }
+        @media (max-width:900px){ .intro{ padding:14px; margin:8px } .tab-btn{ padding:8px 10px }}
+        @media (max-width:700px){ .header h1{font-size:14px} }
     </style>
 </head>
 
 <body>
-    <div id="swagger-ui"></div>
+    <div class="header">
+        <h1>图书馆座位预约系统 - API 文档</h1>
+    </div>
+
+    <div id="tabs" class="tabs"></div>
+    <div id="contents" class="tab-content"></div>
 
     <script src="/swagger-ui/swagger-ui-bundle.js"></script>
     <script src="/swagger-ui/swagger-ui-standalone-preset.js"></script>
-    
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@2.4.0/dist/purify.min.js"></script>
+
     <script>
-        window.onload = function() {
-            // 初始化 Swagger UI
-            const ui = SwaggerUIBundle({
-                url: "/swagger.json",
-                dom_id: '#swagger-ui',
-                deepLinking: true,
-                presets: [
-                    SwaggerUIBundle.presets.apis,
-                    SwaggerUIStandalonePreset
-                ],
-                plugins: [
-                    SwaggerUIBundle.plugins.DownloadUrl
-                ],
-                layout: "StandaloneLayout",
-                validatorUrl: null,
-                displayRequestDuration: true,
-                filter: true,
-                showExtensions: true,
-                showCommonExtensions: true,
-                docExpansion: "list",
-                defaultModelsExpandDepth: 2,
-                defaultModelExpandDepth: 2,
-                onComplete: function() {
-                    console.log('Swagger UI 加载完成');
-                },
-                requestInterceptor: function(request) {
-                    console.log('请求:', request.method, request.url);
-                    return request;
-                },
-                responseInterceptor: function(response) {
-                    console.log('响应:', response.status, response.statusText);
-                    return response;
-                }
+        // 简单 id 生成器：使用索引确保唯一性（支持中文 tag）
+
+        (async function() {
+            const tabsEl = document.getElementById('tabs');
+            const contentsEl = document.getElementById('contents');
+
+            let spec;
+            try {
+                const res = await fetch('/swagger.json');
+                spec = await res.json();
+            } catch (e) {
+                contentsEl.innerHTML = '<div style="padding:20px;color:#900">无法加载 /swagger.json：'+(e.message||e)+'</div>';
+                return;
+            }
+
+            const paths = spec.paths || {};
+            const tagOrder = Array.isArray(spec.tags) ? spec.tags.map(t=>t.name) : [];
+            const tagMap = new Map();
+            const uncategorized = '__UNCATEGORIZED__';
+
+            // 收集所有 operation 的 tag 信息
+            Object.keys(paths).forEach(p => {
+                const methods = Object.keys(paths[p]);
+                methods.forEach(m => {
+                    const op = paths[p][m];
+                    const tags = Array.isArray(op.tags) && op.tags.length ? op.tags : [uncategorized];
+                    tags.forEach(t => {
+                        if (!tagMap.has(t)) tagMap.set(t, {});
+                        if (!tagMap.get(t)[p]) tagMap.get(t)[p] = {};
+                        tagMap.get(t)[p][m] = op;
+                    });
+                });
             });
-            
-            // 将 UI 实例暴露到全局，方便调试
-            window.ui = ui;
-            
-            console.log('Swagger UI 已初始化');
-            console.log('API 文档 URL:', '/swagger.json');
-        };
+
+            // 合并 tagOrder 中没有但是出现在 operation 的 tag
+            tagMap.forEach((_, k) => { if (k !== uncategorized && !tagOrder.includes(k)) tagOrder.push(k); });
+            if (tagMap.has(uncategorized)) tagOrder.push('其他');
+
+            // 特殊 tab：将 简介 放到第一个，API（以前的 全部）在第二位，错误码在第三位
+            const specialTabs = [
+                { name: '简介', key: 'INTRO', type: 'custom' },
+                { name: 'API', key: 'API', type: 'swagger' },
+                { name: '错误码', key: 'ERROR_CODES', type: 'custom' }
+            ];
+
+            const tabs = specialTabs;
+
+            const uiInstances = {}; // 存放已初始化的实例或标记
+            const keyToIndex = {};
+            tabs.forEach((t, i) => keyToIndex[t.key] = i);
+
+            function buildSpecForKey(key) {
+                // 返回一个不包含长 info.description 的 spec 副本，避免 Swagger UI 顶部显示大量文本
+                if (key === 'API') {
+                    try {
+                        const copy = JSON.parse(JSON.stringify(spec));
+                        if (copy.info) copy.info.description = '';
+                        return copy;
+                    } catch (e) {
+                        return spec;
+                    }
+                }
+                const name = key === '其他' ? uncategorized : key;
+                const reducedPaths = {};
+                const group = tagMap.get(name) || {};
+                Object.keys(group).forEach(p => {
+                    reducedPaths[p] = {};
+                    Object.keys(group[p]).forEach(m => {
+                        reducedPaths[p][m] = group[p][m];
+                    });
+                });
+                const { paths, ...rest } = spec;
+                const newSpec = Object.assign({}, rest, { paths: reducedPaths });
+                // 移除说明，放到独立的 "简介" tab
+                if (newSpec.info) newSpec.info = Object.assign({}, newSpec.info, { description: '' });
+                newSpec.tags = [{ name: (key === '其他' ? '其他' : key) }];
+                return newSpec;
+            }
+
+            function createTabButton(tab, index) {
+                const btn = document.createElement('button');
+                btn.className = 'tab-btn' + (index === 0 ? ' active' : '');
+                btn.textContent = tab.name;
+                btn.dataset.key = tab.key;
+                btn.dataset.index = String(index);
+                btn.addEventListener('click', () => switchTabByIndex(index));
+                return btn;
+            }
+
+            function createContentDiv(tab, index) {
+                const id = 'swagger-ui-' + index;
+                const wrap = document.createElement('div');
+                wrap.style.display = index === 0 ? 'block' : 'none';
+                wrap.id = 'wrap-' + id;
+                const inner = document.createElement('div');
+                inner.className = 'swagger-container';
+                inner.id = id;
+                if (index !== 0) {
+                    inner.innerHTML = '<div class="spinner">点击标签以加载该模块的文档（懒加载）</div>';
+                }
+                wrap.appendChild(inner);
+                contentsEl.appendChild(wrap);
+                return id;
+            }
+
+            function switchTabByIndex(index) {
+                Array.from(tabsEl.children).forEach((b, i) => b.classList.toggle('active', i === index));
+                Array.from(contentsEl.children).forEach((child, i) => child.style.display = i === index ? 'block' : 'none');
+                const tab = tabs[index];
+                if (!uiInstances[tab.key]) {
+                    initTabByIndex(index);
+                }
+            }
+
+            async function initTabByIndex(index) {
+                const tab = tabs[index];
+                const id = 'swagger-ui-' + index;
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.innerHTML = '';
+
+                if (tab.type === 'custom') {
+                    // 自定义渲染：简介、错误码、环境、枚举
+                    if (tab.key === 'INTRO') {
+                        renderIntro(el, spec.info && spec.info.description ? spec.info.description : '无简介内容');
+                    } else if (tab.key === 'ERROR_CODES') {
+                        try {
+                            const r = await fetch('/error-codes');
+                            const json = await r.json();
+                            renderErrorCodes(el, json);
+                        } catch (e) {
+                            el.innerHTML = '<div style="color:#900">无法加载错误码：' + (e.message || e) + '</div>';
+                        }
+                    } else if (tab.key === 'ENVIRONMENTS') {
+                        renderEnvironments(el, spec.servers || []);
+                    } else if (tab.key === 'ENUMS') {
+                        renderEnums(el, spec);
+                    }
+                    uiInstances[tab.key] = true; // 标记为已初始化
+                    return;
+                }
+
+                // Swagger UI 渲染
+                const specForTab = buildSpecForKey(tab.key);
+                try {
+                    const ui = SwaggerUIBundle({
+                        spec: specForTab,
+                        dom_id: '#' + id,
+                        deepLinking: true,
+                        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+                        plugins: [SwaggerUIBundle.plugins.DownloadUrl],
+                        layout: 'StandaloneLayout',
+                        validatorUrl: null,
+                        displayRequestDuration: true,
+                        filter: true,
+                        docExpansion: 'list',
+                        defaultModelsExpandDepth: 2,
+                        defaultModelExpandDepth: 2
+                    });
+                    uiInstances[tab.key] = ui;
+                    window['ui_' + index] = ui; // 便于调试
+                } catch (e) {
+                    el.innerHTML = '<div style="color:#900">初始化 Swagger UI 失败：' + (e.message||e) + '</div>';
+                }
+            }
+
+            // 渲染错误码表
+            function renderErrorCodes(container, json) {
+                const codes = (json && json.codes) || [];
+                if (!codes.length) {
+                    container.innerHTML = '<div style="padding:12px;color:#666">未找到错误码。</div>';
+                    return;
+                }
+                const table = document.createElement('table');
+                table.style.width = '100%';
+                table.style.borderCollapse = 'collapse';
+                table.innerHTML = '<thead><tr><th style="text-align:left;padding:8px;border-bottom:1px solid #eee">Key</th><th style="text-align:left;padding:8px;border-bottom:1px solid #eee">Code</th><th style="text-align:left;padding:8px;border-bottom:1px solid #eee">说明</th></tr></thead>';
+                const tbody = document.createElement('tbody');
+                codes.forEach(c => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = '<td style="padding:8px;border-bottom:1px solid #f1f1f1">' + (c.key || '') + '</td>' +
+                                   '<td style="padding:8px;border-bottom:1px solid #f1f1f1">' + (c.code || '') + '</td>' +
+                                   '<td style="padding:8px;border-bottom:1px solid #f1f1f1">' + (c.desc || '') + '</td>';
+                    tbody.appendChild(tr);
+                });
+                table.appendChild(tbody);
+                container.appendChild(table);
+            }
+
+            // 渲染简介（支持简单文本和换行）
+            function escapeHtml(str) {
+                if (!str) return '';
+                return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            }
+
+            function renderIntro(container, text) {
+                let md = text || '';
+                // 移除文档开头重复的标题或包含“完整 API 文档”的首行，避免在简介中重复显示过长标题
+                md = md.replace(/^\s*#\s*📚.*(?:\r?\n)+/, '');
+                md = md.replace(/^\s*#\s*.*完整\s*API\s*文档.*(?:\r?\n)+/i, '');
+                md = md.replace(/^\s*#\s*图书馆座位预约系统.*(?:\r?\n)+/, '');
+                md = md.trim();
+                let html = '';
+                if (window.marked) {
+                    try { html = marked.parse(md); } catch (e) { html = escapeHtml(md).replace(/\n/g,'<br/>'); }
+                } else {
+                    html = escapeHtml(md).replace(/\n/g,'<br/>');
+                }
+                if (window.DOMPurify) html = DOMPurify.sanitize(html);
+                const wrap = document.createElement('div');
+                wrap.className = 'intro';
+                // 强制 100% 宽度（用户要求）
+                wrap.style.width = '100%';
+                wrap.innerHTML = html;
+                container.appendChild(wrap);
+            }
+
+            // 渲染环境信息
+            function renderEnvironments(container, servers) {
+                if (!servers || !servers.length) {
+                    container.innerHTML = '<div style="padding:12px;color:#666">未在 spec 中找到 servers 配置。</div>';
+                    return;
+                }
+                const list = document.createElement('div');
+                list.style.display = 'grid';
+                list.style.gridTemplateColumns = '1fr 2fr';
+                list.style.gap = '8px 16px';
+                servers.forEach(s => {
+                    const k = document.createElement('div');
+                    k.style.color = '#333';
+                    k.style.fontWeight = '600';
+                    k.textContent = s.description || s.url || '';
+                    const v = document.createElement('div');
+                    v.style.color = '#666';
+                    v.textContent = s.url || '';
+                    list.appendChild(k);
+                    list.appendChild(v);
+                });
+                container.appendChild(list);
+            }
+
+            // 提取并渲染枚举信息
+            function renderEnums(container, spec) {
+                const schemas = (spec.components && spec.components.schemas) || {};
+                const rows = [];
+                Object.keys(schemas).forEach(schemaName => {
+                    const sch = schemas[schemaName];
+                    // schema 直接为 enum
+                    if (Array.isArray(sch.enum)) {
+                        rows.push({ schema: schemaName, field: '', values: sch.enum, desc: sch.description || '' });
+                    }
+                    // schema.properties 中包含 enum
+                    if (sch.properties) {
+                        Object.keys(sch.properties).forEach(prop => {
+                            const p = sch.properties[prop];
+                            if (Array.isArray(p.enum)) {
+                                rows.push({ schema: schemaName, field: prop, values: p.enum, desc: p.description || '' });
+                            }
+                        });
+                    }
+                });
+                if (!rows.length) {
+                    container.innerHTML = '<div style="padding:12px;color:#666">未在 components.schemas 中找到 enum。</div>';
+                    return;
+                }
+                const table = document.createElement('table');
+                table.style.width = '100%';
+                table.style.borderCollapse = 'collapse';
+                table.innerHTML = '<thead><tr><th style="text-align:left;padding:8px;border-bottom:1px solid #eee">Schema</th><th style="text-align:left;padding:8px;border-bottom:1px solid #eee">Field</th><th style="text-align:left;padding:8px;border-bottom:1px solid #eee">Values</th><th style="text-align:left;padding:8px;border-bottom:1px solid #eee">说明</th></tr></thead>';
+                const tbody = document.createElement('tbody');
+                rows.forEach(r => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = '<td style="padding:8px;border-bottom:1px solid #f1f1f1">' + r.schema + '</td>' +
+                                   '<td style="padding:8px;border-bottom:1px solid #f1f1f1">' + (r.field || '-') + '</td>' +
+                                   '<td style="padding:8px;border-bottom:1px solid #f1f1f1">' + JSON.stringify(r.values) + '</td>' +
+                                   '<td style="padding:8px;border-bottom:1px solid #f1f1f1">' + (r.desc || '') + '</td>';
+                    tbody.appendChild(tr);
+                });
+                table.appendChild(tbody);
+                container.appendChild(table);
+            }
+
+            // 构建 tab 按钮与内容区域
+            tabs.forEach((t, i) => {
+                const btn = createTabButton(t, i);
+                tabsEl.appendChild(btn);
+                createContentDiv(t, i);
+            });
+
+            // 初始化第一个 tab（简介）
+            initTabByIndex(0);
+            // 预热第二个 tab（API）以提升体验
+            if (tabs.length > 1) setTimeout(() => { if (!uiInstances[tabs[1].key]) initTabByIndex(1); }, 200);
+
+        })();
     </script>
 </body>
 </html>
