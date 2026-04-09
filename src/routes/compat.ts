@@ -19,7 +19,7 @@ import { Booking, Floor, Seat, TimeSlotStatus } from '../models/mysql';
 import { Op } from 'sequelize';
 import { BookingStatus, TimeSlotStatusValue } from '../models/mysql/types';
 import { ErrorCodes } from '../utils/error-codes';
-import { normalizeUploadUrl } from '../utils/upload';
+import { normalizeUploadUrl, saveBase64Image } from '../utils/upload';
 import { compareFloorName } from '../utils/floor-order';
 import { normalizeSeatStatus } from '../utils/seat-status';
 
@@ -239,7 +239,7 @@ router.get('/bookings', authMiddleware, async (ctx) => {
         ctx.body = {
             success: true,
             data: {
-                bookings,
+                list: bookings,
                 total: count,
                 page: pageNum,
                 limit: pageLimit,
@@ -472,18 +472,8 @@ router.post('/login', async (ctx) => {
         }
 
         const normalizeRole = (r: any) => {
-            try {
-                if (r === undefined || r === null) return Roles.USER;
-                if (typeof r === 'number') return r;
-                if (typeof r === 'string') {
-                    const s = r.toLowerCase();
-                    if (s === 'admin' || s === '1') return Roles.ADMIN;
-                    return Roles.USER;
-                }
-                return Roles.USER;
-            } catch (e) {
-                return Roles.USER;
-            }
+            if (typeof r === 'number') return r;
+            return Roles.USER;
         };
 
         const roleForToken = normalizeRole(user.role);
@@ -522,9 +512,28 @@ router.post('/login', async (ctx) => {
 router.get('/seat/list', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const { floorId, keyword, q } = ctx.query as any;
+        const {
+            floorId,
+            keyword,
+            q,
+            status,
+            type,
+            page = 1,
+            limit = 20,
+        } = ctx.query as any;
+        const pageNum = parseInt(page as string);
+        const pageLimit = parseInt(limit as string);
         const where: any = {};
         if (floorId) where.floorId = floorId;
+        if (typeof status !== 'undefined' && status !== '') {
+            const parsedStatus = Number(status);
+            if (!Number.isNaN(parsedStatus)) {
+                where.status = parsedStatus;
+            }
+        }
+        if (typeof type !== 'undefined' && type !== '') {
+            where.type = type;
+        }
         const seats = await Seat.findAll({
             where,
             include: [
@@ -539,7 +548,7 @@ router.get('/seat/list', authMiddleware, async (ctx) => {
         const searchKeyword = String(keyword || q || '')
             .trim()
             .toLowerCase();
-        const filteredSeats = searchKeyword
+        let filteredSeats = searchKeyword
             ? seats.filter((seat: any) => {
                   const floorName = (seat as any).floor?.name || '';
                   const searchValues = [
@@ -560,10 +569,16 @@ router.get('/seat/list', authMiddleware, async (ctx) => {
               })
             : seats;
 
+        const total = filteredSeats.length;
+        const pagedSeats = filteredSeats.slice(
+            (pageNum - 1) * pageLimit,
+            pageNum * pageLimit
+        );
+
         // collect audit user ids from seats and fetch display names
         const seatUserIds = Array.from(
             new Set(
-                filteredSeats
+                pagedSeats
                     .flatMap((s: any) => [s.createdBy, s.updatedBy])
                     .filter(Boolean)
             )
@@ -578,31 +593,36 @@ router.get('/seat/list', authMiddleware, async (ctx) => {
             });
         }
 
+        const mappedSeats = pagedSeats.map((seat) => ({
+            id: seat.id,
+            floorId: seat.floorId,
+            floorName: (seat as any).floor?.name || '',
+            rowNum: seat.rowNum,
+            colNum: seat.colNum,
+            status: normalizeSeatStatus(seat.status),
+            type: seat.type,
+            hasSocket: seat.hasSocket,
+            isWindow: seat.isWindow,
+            zone: seat.zone,
+            zoneId: (seat as any).zoneId || (seat as any).zoneObj?.id,
+            zoneName: (seat as any).zoneObj?.name || seat.zone,
+            description: seat.description,
+            createdBy: (seat as any).createdBy,
+            createdByName:
+                seatUserMap[(seat as any).createdBy]?.username ||
+                seatUserMap[(seat as any).createdBy]?.name,
+            updatedBy: (seat as any).updatedBy,
+            updatedByName:
+                seatUserMap[(seat as any).updatedBy]?.username ||
+                seatUserMap[(seat as any).updatedBy]?.name,
+        }));
+
         ctx.body = {
             success: true,
-            data: filteredSeats.map((seat) => ({
-                id: seat.id,
-                floorId: seat.floorId,
-                floorName: (seat as any).floor?.name || '',
-                rowNum: seat.rowNum,
-                colNum: seat.colNum,
-                status: normalizeSeatStatus(seat.status),
-                type: seat.type,
-                hasSocket: seat.hasSocket,
-                isWindow: seat.isWindow,
-                zone: seat.zone,
-                zoneId: (seat as any).zoneId || (seat as any).zoneObj?.id,
-                zoneName: (seat as any).zoneObj?.name || seat.zone,
-                description: seat.description,
-                createdBy: (seat as any).createdBy,
-                createdByName:
-                    seatUserMap[(seat as any).createdBy]?.username ||
-                    seatUserMap[(seat as any).createdBy]?.name,
-                updatedBy: (seat as any).updatedBy,
-                updatedByName:
-                    seatUserMap[(seat as any).updatedBy]?.username ||
-                    seatUserMap[(seat as any).updatedBy]?.name,
-            })),
+            data: {
+                list: mappedSeats,
+                total,
+            },
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -873,7 +893,10 @@ router.get('/floors', authMiddleware, async (ctx) => {
                 userMap[(floor as any).updatedBy]?.name,
         }));
 
-        ctx.body = { success: true, data: mapped };
+        ctx.body = {
+            success: true,
+            data: { list: mapped, total: mapped.length },
+        };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError(
@@ -1020,15 +1043,96 @@ router.delete('/floors/:id', authMiddleware, async (ctx) => {
 router.get('/activity/list', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
+        const {
+            page = 1,
+            limit = 20,
+            q,
+            title,
+            floorId,
+            status,
+            startTime,
+        } = ctx.query as any;
+
         // Try populate first (for documents that reference User properly)
         let activities = await Activity.find()
             .populate('createdBy', 'name username')
             .populate('updatedBy', 'name username')
             .lean();
 
+        const filterTitle = String(title || q || '').trim();
+        if (filterTitle) {
+            const lowerTitle = filterTitle.toLowerCase();
+            activities = (activities || []).filter((a: any) => {
+                const searchValues = [a.title, a.description, a.location]
+                    .filter(Boolean)
+                    .map((val: any) => String(val).toLowerCase());
+                return searchValues.some((value: string) =>
+                    value.includes(lowerTitle)
+                );
+            });
+        }
+
+        if (typeof floorId !== 'undefined' && floorId !== '') {
+            activities = (activities || []).filter(
+                (a: any) => String(a.floorId) === String(floorId)
+            );
+        }
+
+        if (typeof status !== 'undefined' && status !== '') {
+            const statusValue = Number(status);
+            if (!Number.isNaN(statusValue)) {
+                activities = (activities || []).filter(
+                    (a: any) => Number(a.status) === statusValue
+                );
+            }
+        }
+
+        if (typeof startTime !== 'undefined' && startTime !== '') {
+            const parseRange = (value: any) => {
+                if (!value) return null;
+                if (Array.isArray(value) && value.length >= 2)
+                    return [value[0], value[1]];
+                if (typeof value === 'string') {
+                    if (value.includes('~'))
+                        return value.split('~').map((s) => s.trim());
+                    if (value.includes(','))
+                        return value.split(',').map((s) => s.trim());
+                    return [value.trim(), value.trim()];
+                }
+                return null;
+            };
+            const range = parseRange(startTime);
+            if (range && range[0] && range[1]) {
+                activities = (activities || []).filter((a: any) => {
+                    const start = a.startTime
+                        ? String(a.startTime).slice(0, 10)
+                        : '';
+                    return start >= range[0] && start <= range[1];
+                });
+            } else if (Array.isArray(startTime) && startTime.length === 1) {
+                const single = String(startTime[0]).slice(0, 10);
+                activities = (activities || []).filter(
+                    (a: any) => String(a.startTime).slice(0, 10) === single
+                );
+            } else if (typeof startTime === 'string') {
+                const single = String(startTime).slice(0, 10);
+                activities = (activities || []).filter(
+                    (a: any) => String(a.startTime).slice(0, 10) === single
+                );
+            }
+        }
+
+        const pageNum = parseInt(page as string);
+        const pageLimit = parseInt(limit as string);
+        const total = (activities || []).length;
+        const pagedActivities = (activities || []).slice(
+            (pageNum - 1) * pageLimit,
+            pageNum * pageLimit
+        );
+
         // Collect any audit ids that still lack a display name (could be stored as plain id)
         const missingUserIds = new Set<string>();
-        (activities || []).forEach((a: any) => {
+        (pagedActivities || []).forEach((a: any) => {
             // createdBy may be populated object or raw id
             if (a.createdBy && !(a.createdBy.name || a.createdBy.username)) {
                 try {
@@ -1054,7 +1158,7 @@ router.get('/activity/list', authMiddleware, async (ctx) => {
             });
         }
 
-        const mapped = (activities || []).map((a: any) => ({
+        const mapped = (pagedActivities || []).map((a: any) => ({
             ...a,
             createdByName:
                 a.createdBy?.username ||
@@ -1071,7 +1175,7 @@ router.get('/activity/list', authMiddleware, async (ctx) => {
                 undefined,
         }));
 
-        ctx.body = { success: true, data: mapped };
+        ctx.body = { success: true, data: { list: mapped, total } };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError(
@@ -1085,7 +1189,16 @@ router.get('/activity/list', authMiddleware, async (ctx) => {
 router.get('/user/list', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const { page = 1, limit = 20, q, blacklisted } = ctx.query as any;
+        const {
+            page = 1,
+            limit = 20,
+            q,
+            blacklisted,
+            role,
+            creditScore,
+            minCreditScore,
+            maxCreditScore,
+        } = ctx.query as any;
         const pageNum = parseInt(page as string);
         const pageLimit = parseInt(limit as string);
         const filter: any = {};
@@ -1097,25 +1210,62 @@ router.get('/user/list', authMiddleware, async (ctx) => {
             ];
         }
 
-        // 支持多种形式的 blacklisted 查询（1/'1'/true/'true'/'blacklisted' 等）
         if (typeof blacklisted !== 'undefined') {
-            const isBlacklisted = (() => {
-                if (blacklisted === true) return true;
-                if (typeof blacklisted === 'number') return blacklisted === 1;
-                if (typeof blacklisted === 'string') {
-                    const n = Number(blacklisted);
-                    if (!Number.isNaN(n)) return n === 1;
-                    const lower = blacklisted.toLowerCase();
-                    return (
-                        lower === 'true' ||
-                        lower === '1' ||
-                        lower === 'blacklisted' ||
-                        lower === 'banned'
-                    );
-                }
-                return false;
-            })();
+            const isBlacklisted = Number(blacklisted) === 1;
             filter.blacklisted = isBlacklisted;
+        }
+
+        if (typeof role !== 'undefined' && role !== null && role !== '') {
+            const parsedRole = Number(role);
+            if (!Number.isNaN(parsedRole)) {
+                filter.role = parsedRole;
+            } else if (typeof role === 'string') {
+                const lower = role.toLowerCase();
+                if (lower === 'admin') filter.role = Roles.ADMIN;
+                else if (lower === 'user') filter.role = Roles.USER;
+            }
+        }
+
+        if (
+            typeof creditScore !== 'undefined' &&
+            creditScore !== null &&
+            creditScore !== ''
+        ) {
+            const parsedScore = Number(creditScore);
+            if (!Number.isNaN(parsedScore)) {
+                filter.creditScore = parsedScore;
+            }
+        }
+
+        if (
+            (typeof minCreditScore !== 'undefined' &&
+                minCreditScore !== null &&
+                minCreditScore !== '') ||
+            (typeof maxCreditScore !== 'undefined' &&
+                maxCreditScore !== null &&
+                maxCreditScore !== '')
+        ) {
+            filter.creditScore = filter.creditScore || {};
+            if (
+                typeof minCreditScore !== 'undefined' &&
+                minCreditScore !== null &&
+                minCreditScore !== ''
+            ) {
+                const minScore = Number(minCreditScore);
+                if (!Number.isNaN(minScore)) {
+                    filter.creditScore.$gte = minScore;
+                }
+            }
+            if (
+                typeof maxCreditScore !== 'undefined' &&
+                maxCreditScore !== null &&
+                maxCreditScore !== ''
+            ) {
+                const maxScore = Number(maxCreditScore);
+                if (!Number.isNaN(maxScore)) {
+                    filter.creditScore.$lte = maxScore;
+                }
+            }
         }
 
         const total = await User.countDocuments(filter);
@@ -1124,25 +1274,15 @@ router.get('/user/list', authMiddleware, async (ctx) => {
             .limit(pageLimit)
             .lean();
 
-        // Normalize role to numeric value for frontend compatibility
         const normalizeRoleValue = (r: any) => {
-            try {
-                if (r === undefined || r === null) return Roles.USER;
-                if (typeof r === 'number') return r;
-                if (typeof r === 'string') {
-                    const s = r.toLowerCase();
-                    if (s === 'admin' || s === '1') return Roles.ADMIN;
-                    return Roles.USER;
-                }
-                return Roles.USER;
-            } catch (e) {
-                return Roles.USER;
-            }
+            if (typeof r === 'number') return r;
+            return Roles.USER;
         };
 
         list = (list || []).map((u: any) => ({
             ...u,
             role: normalizeRoleValue(u.role),
+            avatar: normalizeUploadUrl(String(u.avatar || ''), ctx.origin),
         }));
 
         ctx.body = { success: true, data: { list, total } };
@@ -1161,6 +1301,7 @@ router.get('/user/:id', authMiddleware, async (ctx) => {
         const user = await User.findById(id).select('-password').lean();
         if (!user)
             throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
+        user.avatar = normalizeUploadUrl(String(user.avatar || ''), ctx.origin);
         ctx.body = { success: true, data: user };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -1182,14 +1323,35 @@ router.post('/user', authMiddleware, async (ctx) => {
         if (!data.password) {
             throw new CustomError('密码不能为空', ErrorCodes.INVALID_PARAMS);
         }
-        // normalize role: accept string or numeric
-        if (typeof data.role === 'string') {
-            if (data.role === 'admin') data.role = Roles.ADMIN;
-            else data.role = Roles.USER;
+        if (
+            data.role !== undefined &&
+            data.role !== null &&
+            typeof data.role !== 'number'
+        ) {
+            delete data.role;
         }
         try {
+            if (
+                data.avatar &&
+                typeof data.avatar === 'string' &&
+                data.avatar.startsWith('data:')
+            ) {
+                data.avatar = await saveBase64Image(
+                    data.avatar,
+                    ctx.state?.user?.id,
+                    ctx.state?.user?.username
+                );
+                data.avatar = normalizeUploadUrl(
+                    String(data.avatar || ''),
+                    ctx.origin
+                );
+            }
             const user = new User(data);
             await user.save();
+            user.avatar = normalizeUploadUrl(
+                String(user.avatar || ''),
+                ctx.origin
+            );
             ctx.body = { success: true, data: user };
         } catch (err: any) {
             // handle duplicate key errors (unique indexes)
@@ -1219,16 +1381,32 @@ router.put('/user/:id', authMiddleware, async (ctx) => {
             const bcrypt = require('bcryptjs');
             data.password = await bcrypt.hash(data.password, 10);
         }
-        // normalize incoming role
-        if (data.role && typeof data.role === 'string') {
-            if (data.role === 'admin') data.role = Roles.ADMIN;
-            else data.role = Roles.USER;
+        if (
+            data.role !== undefined &&
+            data.role !== null &&
+            typeof data.role !== 'number'
+        ) {
+            delete data.role;
+        }
+        if (
+            data.avatar &&
+            typeof data.avatar === 'string' &&
+            data.avatar.startsWith('data:')
+        ) {
+            data.avatar = await saveBase64Image(
+                data.avatar,
+                ctx.state?.user?.id,
+                ctx.state?.user?.username
+            );
         }
         const user = await User.findByIdAndUpdate(id, data, {
             new: true,
-        }).select('-password');
+        })
+            .select('-password')
+            .lean();
         if (!user)
             throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
+        user.avatar = normalizeUploadUrl(String(user.avatar || ''), ctx.origin);
         ctx.body = { success: true, data: user };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -1260,23 +1438,7 @@ router.put('/user/status/:id', authMiddleware, async (ctx) => {
         const id = ctx.params.id;
         const { status, reason } = ctx.request.body as any;
         const update: any = {};
-        // 支持多种形式的 status：数字（1/0）、字符串（"blacklisted"/"active"）或布尔值
-        const isBlacklisted = (() => {
-            if (status === true) return true;
-            if (typeof status === 'number') return status === 1;
-            if (typeof status === 'string') {
-                // 数字字符串 '1' 也视为黑名单
-                const n = Number(status);
-                if (!Number.isNaN(n)) return n === 1;
-                const lower = status.toLowerCase?.();
-                return (
-                    lower === 'blacklisted' ||
-                    lower === 'banned' ||
-                    lower === 'blacklist'
-                );
-            }
-            return false;
-        })();
+        const isBlacklisted = Number(status) === 1;
         if (isBlacklisted) {
             update.blacklisted = true;
             if (reason) update.blacklistReason = reason;
@@ -1307,8 +1469,8 @@ router.put('/user/batch/status', authMiddleware, async (ctx) => {
         if (!Array.isArray(userIds))
             throw new CustomError('Invalid params', ErrorCodes.INVALID_PARAMS);
         const update: any = {};
-        if (status === 'blacklisted' || status === 1) update.blacklisted = true;
-        else update.blacklisted = false;
+        const isBlacklisted = Number(status) === 1;
+        update.blacklisted = isBlacklisted;
         await User.updateMany({ _id: { $in: userIds } }, { $set: update });
         ctx.body = { success: true };
     } catch (error: any) {
@@ -2335,11 +2497,45 @@ router.get('/statistics', authMiddleware, async (ctx) => {
 // ---- Credit Records ----
 router.get('/user/credit/records', authMiddleware, async (ctx) => {
     try {
-        const { page = 1, limit = 20, userId } = ctx.query as any;
+        const {
+            page = 1,
+            limit = 20,
+            userId,
+            q,
+            type,
+            reason,
+        } = ctx.query as any;
         const pageNum = parseInt(page as string);
         const pageLimit = parseInt(limit as string);
         const query: any = {};
         if (userId) query.userId = userId;
+        if (type !== undefined && type !== null && type !== '') {
+            query.type = Number(type);
+        }
+        if (reason) {
+            query.reason = { $regex: reason, $options: 'i' };
+        }
+
+        let userSearchIds: string[] | undefined;
+        if (q) {
+            const matchingUsers = await User.find({
+                $or: [
+                    { username: { $regex: q, $options: 'i' } },
+                    { name: { $regex: q, $options: 'i' } },
+                ],
+            })
+                .select('_id')
+                .lean();
+            userSearchIds = matchingUsers.map((u: any) => String(u._id));
+            if (userSearchIds.length) {
+                query.$or = [
+                    { userId: { $in: userSearchIds } },
+                    { updatedBy: { $in: userSearchIds } },
+                ];
+            } else {
+                query.userId = '__not_found__';
+            }
+        }
 
         // Use lean fetch + manual lookup for compatibility
         const records = await CreditRecord.find(query)
@@ -2411,11 +2607,82 @@ router.get('/user/credit/records', authMiddleware, async (ctx) => {
 router.get('/violation/list', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const { page = 1, limit = 20 } = ctx.query as any;
+        const {
+            page = 1,
+            limit = 20,
+            userName,
+            studentId,
+            type,
+            date,
+            q,
+        } = ctx.query as any;
         const pageNum = parseInt(page as string);
         const pageLimit = parseInt(limit as string);
+        const where: any = { status: BookingStatus.VIOLATED };
+
+        if (typeof type !== 'undefined' && type !== '') {
+            const parsedType = Number(type);
+            if (!Number.isNaN(parsedType)) {
+                where.type = parsedType;
+            } else {
+                where.type = type;
+            }
+        }
+
+        if (typeof date !== 'undefined' && date !== '') {
+            const toDate = (value: any) => {
+                if (!value) return undefined;
+                if (Array.isArray(value) && value.length > 0) return value[0];
+                if (typeof value === 'string') return value;
+                return String(value);
+            };
+            const parsedDate = toDate(date);
+            if (parsedDate) {
+                where.date = parsedDate;
+            }
+        }
+
+        let userFilters: any = {};
+        const keyword = String(q || '').trim();
+        if (userName) {
+            userFilters.username = { $regex: String(userName), $options: 'i' };
+        }
+        if (studentId) {
+            userFilters.studentId = {
+                $regex: String(studentId),
+                $options: 'i',
+            };
+        }
+        if (keyword) {
+            userFilters.$or = [
+                { username: { $regex: keyword, $options: 'i' } },
+                { name: { $regex: keyword, $options: 'i' } },
+                { studentId: { $regex: keyword, $options: 'i' } },
+            ];
+        }
+
+        if (Object.keys(userFilters).length) {
+            const matchedUsers = await User.find(userFilters)
+                .select('_id')
+                .lean();
+            const matchedIds = matchedUsers.map((u: any) => String(u._id));
+            if (matchedIds.length === 0) {
+                ctx.body = {
+                    success: true,
+                    data: {
+                        list: [],
+                        total: 0,
+                        page: pageNum,
+                        limit: pageLimit,
+                    },
+                };
+                return;
+            }
+            where.userId = { [Op.in]: matchedIds };
+        }
+
         const { count, rows } = await Booking.findAndCountAll({
-            where: { status: BookingStatus.VIOLATED },
+            where,
             order: [['updated_at', 'DESC']],
             offset: (pageNum - 1) * pageLimit,
             limit: pageLimit,

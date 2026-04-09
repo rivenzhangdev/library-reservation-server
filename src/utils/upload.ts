@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
-import * as fs from 'fs';
 import * as path from 'path';
 
 const UPLOAD_DIR = path.join(process.cwd(), 'uploads');
@@ -9,7 +8,6 @@ const MINIO_USE_SSL = process.env.MINIO_USE_SSL === 'true';
 const MINIO_ACCESS_KEY = process.env.MINIO_ACCESS_KEY || '';
 const MINIO_SECRET_KEY = process.env.MINIO_SECRET_KEY || '';
 const MINIO_BUCKET = process.env.MINIO_BUCKET || '';
-
 const MINIO_PATH_PREFIX = (process.env.MINIO_PATH_PREFIX || 'uploads').replace(
     /^\/+|\/+$/g,
     ''
@@ -32,36 +30,76 @@ if (USE_MINIO) {
     });
 }
 
-function ensureDir() {
-    if (!fs.existsSync(UPLOAD_DIR))
-        fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-
 function getRemoteObjectKey(filename: string) {
     return MINIO_PATH_PREFIX ? `${MINIO_PATH_PREFIX}/${filename}` : filename;
 }
 
-export function normalizeUploadUrl(url: string): string {
+function normalizePath(path: string): string {
+    return path.replace(/\/{2,}/g, '/');
+}
+
+export function normalizeUploadUrl(url: string, baseUrl?: string): string {
     if (!url) return url;
-    if (url.startsWith('/uploads/')) return url;
+
+    const normalizedBaseUrl = baseUrl
+        ? baseUrl.replace(/\/+$/g, '')
+        : undefined;
+
+    let parsedUrl: URL | null = null;
     try {
-        const parsed = new URL(url);
-        const pathname = parsed.pathname || '';
-        const match = pathname.match(
-            /\/([^/]+\.(?:jpg|jpeg|png|gif|webp|svg|bin))$/i
-        );
-        if (match) {
-            return `/uploads/${match[1]}`;
-        }
+        parsedUrl = new URL(url);
     } catch {
-        const match = url.match(
-            /\/([^/]+\.(?:jpg|jpeg|png|gif|webp|svg|bin))$/i
-        );
-        if (match) {
-            return `/uploads/${match[1]}`;
+        // not an absolute URL
+    }
+
+    if (parsedUrl) {
+        const isHttp = parsedUrl.protocol.startsWith('http');
+        const minioHost = `${MINIO_ENDPOINT}:${MINIO_PORT}`;
+        const usesMinioHost = MINIO_ENDPOINT && parsedUrl.host === minioHost;
+        const pathName = normalizePath(parsedUrl.pathname || '');
+
+        if (
+            usesMinioHost &&
+            MINIO_PATH_PREFIX &&
+            pathName.startsWith(`/${MINIO_PATH_PREFIX}/`)
+        ) {
+            const relative = normalizePath(
+                `/uploads/${pathName.slice(MINIO_PATH_PREFIX.length + 1)}`
+            );
+            return normalizedBaseUrl
+                ? `${normalizedBaseUrl}${relative}`
+                : relative;
+        }
+
+        if (isHttp) {
+            const cleanedPath = normalizePath(parsedUrl.pathname || '');
+            return `${parsedUrl.protocol}//${parsedUrl.host}${cleanedPath}${parsedUrl.search}${parsedUrl.hash}`;
         }
     }
-    return url;
+
+    const cleanedUrl = normalizePath(url);
+
+    if (cleanedUrl.startsWith('/uploads/')) {
+        return normalizedBaseUrl
+            ? `${normalizedBaseUrl}${cleanedUrl}`
+            : cleanedUrl;
+    }
+
+    if (MINIO_PATH_PREFIX && cleanedUrl.startsWith(`/${MINIO_PATH_PREFIX}/`)) {
+        const relative = normalizePath(
+            `/uploads/${cleanedUrl.slice(MINIO_PATH_PREFIX.length + 1)}`
+        );
+        return normalizedBaseUrl ? `${normalizedBaseUrl}${relative}` : relative;
+    }
+
+    const match = cleanedUrl.match(
+        /\/([^/]+\.(?:jpg|jpeg|png|gif|webp|svg|bin))$/i
+    );
+    if (match) {
+        const relative = normalizePath(`/uploads/${match[1]}`);
+        return normalizedBaseUrl ? `${normalizedBaseUrl}${relative}` : relative;
+    }
+    return cleanedUrl;
 }
 
 async function ensureMinioBucketExists(): Promise<void> {
@@ -121,6 +159,12 @@ async function deleteFromMinio(filename: string) {
     });
 }
 
+function getUploadUrl(filename: string): string {
+    // Always return the backend proxy path so uploaded objects can be served
+    // through the backend and do not rely on direct MinIO browser URL.
+    return `/uploads/${filename}`;
+}
+
 export async function saveBase64Image(
     dataUrl: string,
     uploaderId?: any,
@@ -150,16 +194,13 @@ export async function saveBase64Image(
         .toString(36)
         .slice(2, 8)}.${ext}`;
 
-    const url = `/uploads/${name}`;
-    if (USE_MINIO) {
-        await uploadToMinio(name, mime, buf);
-    } else {
-        ensureDir();
-        const filePath = path.join(UPLOAD_DIR, name);
-        fs.writeFileSync(filePath, buf);
+    if (!USE_MINIO) {
+        throw new Error('MinIO is not configured for uploads');
     }
+    const url = getUploadUrl(name);
+    await uploadToMinio(name, mime, buf);
 
-    // try to persist metadata to Mongo Uploads collection if available
+    // persist metadata to Mongo Uploads collection if available
     try {
         // lazy-require to avoid startup ordering issues
         // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -173,20 +214,19 @@ export async function saveBase64Image(
             };
             if (uploaderId) docData.uploaderId = uploaderId;
             if (uploaderName) docData.uploaderName = uploaderName;
-            const doc = new Upload(docData);
-            // fire and forget
-            doc.save().catch((e: any) =>
-                console.error('Failed to save upload metadata', e)
-            );
+            await Upload.create(docData);
         }
-    } catch {
-        // ignore failures to avoid blocking uploads
+    } catch (e: any) {
+        console.error('Failed to save upload metadata', e);
     }
 
     return url;
 }
 
 export function getUploadPath(filename: string): string {
+    if (!USE_MINIO) {
+        throw new Error('MinIO is not configured for uploads');
+    }
     return path.join(UPLOAD_DIR, filename);
 }
 
@@ -194,14 +234,10 @@ export async function deleteUploadByFilename(
     filename: string
 ): Promise<boolean> {
     try {
-        if (USE_MINIO) {
-            await deleteFromMinio(filename);
-            return true;
+        if (!USE_MINIO) {
+            throw new Error('MinIO is not configured for uploads');
         }
-        const filePath = getUploadPath(filename);
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-        }
+        await deleteFromMinio(filename);
         return true;
     } catch (e) {
         console.error('Failed to delete upload by filename', e);

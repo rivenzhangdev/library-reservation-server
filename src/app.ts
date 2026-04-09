@@ -1,6 +1,9 @@
+import dotenv from 'dotenv';
+
+dotenv.config();
+
 import Koa from 'koa';
 import bodyParser from 'koa-bodyparser';
-import dotenv from 'dotenv';
 import { exec } from 'child_process';
 import net from 'net';
 import inquirer from 'inquirer';

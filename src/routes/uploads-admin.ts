@@ -25,11 +25,13 @@ function makeAbsoluteUrl(ctx: any, url: string) {
     if (/^https?:\/\//i.test(url)) {
         return url;
     }
-    const origin = ctx.origin || `${ctx.protocol}://${ctx.host}`;
-    if (url.startsWith('/')) {
-        return `${origin}${url}`;
-    }
-    return `${origin}/${url}`;
+    const backendBase = (
+        process.env.BACKEND_URL || `${ctx.protocol}://${ctx.host}`
+    ).replace(/\/+$/g, '');
+    const normalizedUrl = url.replace(/\/\/{2,}/g, '/');
+    return normalizedUrl.startsWith('/')
+        ? `${backendBase}${normalizedUrl}`
+        : `${backendBase}/${normalizedUrl}`;
 }
 
 // list uploads
@@ -70,16 +72,7 @@ router.get('/', authMiddleware, async (ctx) => {
  */
 const handleUpload = async (ctx: any) => {
     const body = ctx.request.body as any;
-    let dataUrl = body?.dataUrl || body?.data?.dataUrl || body?.data?.url;
-    if (!dataUrl && body?.url) dataUrl = body.url;
-    console.log(
-        'POST /api/uploads received, hasDataUrl=',
-        !!dataUrl,
-        'dataUrlLength=',
-        dataUrl ? dataUrl.length : 0,
-        'bodyKeys=',
-        Object.keys(body || {}).join(', ')
-    );
+    const dataUrl = body?.dataUrl;
     if (!dataUrl) ctx.throw(400, 'Missing dataUrl');
     const uploaderId = ctx.state?.user?.id;
     const uploaderName =
@@ -95,7 +88,12 @@ router.post('/', optionalAuthMiddleware, async (ctx) => {
         await handleUpload(ctx);
     } catch (e: any) {
         console.error('Upload failed', e);
-        throw new CustomError('Upload failed', ErrorCodes.INTERNAL_ERROR, 500);
+        if (e.isCustom) throw e;
+        throw new CustomError(
+            e?.message || 'Upload failed',
+            ErrorCodes.INTERNAL_ERROR,
+            500
+        );
     }
 });
 
@@ -104,7 +102,12 @@ router.post('/upload', optionalAuthMiddleware, async (ctx) => {
         await handleUpload(ctx);
     } catch (e: any) {
         console.error('Upload failed (alias /upload)', e);
-        throw new CustomError('Upload failed', ErrorCodes.INTERNAL_ERROR, 500);
+        if (e.isCustom) throw e;
+        throw new CustomError(
+            e?.message || 'Upload failed',
+            ErrorCodes.INTERNAL_ERROR,
+            500
+        );
     }
 });
 

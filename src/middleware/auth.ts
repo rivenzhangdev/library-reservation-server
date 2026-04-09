@@ -93,14 +93,6 @@ export async function authMiddleware(ctx: Context, next: Next) {
             try {
                 if (r === undefined || r === null) return 0;
                 if (typeof r === 'number') return r;
-                if (typeof r === 'string') {
-                    const s = r.toLowerCase();
-                    if (s === 'admin' || s === '1') return 1;
-                    if (s === 'user' || s === '0') return 0;
-                    const p = parseInt(r, 10);
-                    if (!Number.isNaN(p)) return p;
-                    return 0;
-                }
                 return 0;
             } catch (e) {
                 return 0;
@@ -204,14 +196,6 @@ export async function optionalAuthMiddleware(ctx: Context, next: Next) {
                 try {
                     if (r === undefined || r === null) return 0;
                     if (typeof r === 'number') return r;
-                    if (typeof r === 'string') {
-                        const s = r.toLowerCase();
-                        if (s === 'admin' || s === '1') return 1;
-                        if (s === 'user' || s === '0') return 0;
-                        const p = parseInt(r, 10);
-                        if (!Number.isNaN(p)) return p;
-                        return 0;
-                    }
                     return 0;
                 } catch (e) {
                     return 0;

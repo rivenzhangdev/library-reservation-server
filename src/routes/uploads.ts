@@ -1,8 +1,9 @@
 import Router from 'koa-router';
-import fs from 'fs';
-import path from 'path';
-import Minio from 'minio';
+import * as MinioPkg from 'minio';
 
+const Minio = (MinioPkg as any)?.Client
+    ? MinioPkg
+    : (MinioPkg as any)?.default ?? MinioPkg;
 const MINIO_ENDPOINT = process.env.MINIO_ENDPOINT || '';
 const MINIO_PORT = parseInt(process.env.MINIO_PORT || '9000', 10);
 const MINIO_USE_SSL = process.env.MINIO_USE_SSL === 'true';
@@ -53,42 +54,37 @@ router.get('/:name', async (ctx) => {
     const ext = name.split('.').pop() || '';
     ctx.set('Content-Type', contentTypeByExt(ext));
 
-    if (USE_MINIO) {
-        const objectName = getRemoteObjectKey(name);
-        try {
-            const stream = await new Promise<any>((resolve, reject) => {
-                minioClient.getObject(
-                    MINIO_BUCKET,
-                    objectName,
-                    (err: any, dataStream: any) => {
-                        if (err) return reject(err);
-                        resolve(dataStream);
-                    }
-                );
-            });
-            ctx.body = stream;
-            return;
-        } catch (e: any) {
-            if (e?.code === 'NoSuchKey' || e?.statusCode === 404) {
-                ctx.status = 404;
-                ctx.body = 'Not found';
-                return;
-            }
-            console.error('Failed to read upload from MinIO', e);
-            ctx.status = 500;
-            ctx.body = 'Internal server error';
-            return;
-        }
-    }
-
-    const uploadsDir = path.join(process.cwd(), 'uploads');
-    const filePath = path.join(uploadsDir, name);
-    if (!fs.existsSync(filePath)) {
-        ctx.status = 404;
-        ctx.body = 'Not found';
+    if (!USE_MINIO) {
+        ctx.status = 500;
+        ctx.body = 'MinIO is not configured for uploads';
         return;
     }
-    ctx.body = fs.createReadStream(filePath);
+
+    const objectName = getRemoteObjectKey(name);
+    try {
+        const stream = await new Promise<any>((resolve, reject) => {
+            minioClient.getObject(
+                MINIO_BUCKET,
+                objectName,
+                (err: any, dataStream: any) => {
+                    if (err) return reject(err);
+                    resolve(dataStream);
+                }
+            );
+        });
+        ctx.body = stream;
+        return;
+    } catch (e: any) {
+        if (e?.code === 'NoSuchKey' || e?.statusCode === 404) {
+            ctx.status = 404;
+            ctx.body = 'Not found';
+            return;
+        }
+        console.error('Failed to read upload from MinIO', e);
+        ctx.status = 500;
+        ctx.body = 'Internal server error';
+        return;
+    }
 });
 
 export default router;
