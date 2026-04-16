@@ -21,6 +21,16 @@ export const ErrorCodes = {
     TOKEN_EXPIRED: 2005, // Token 过期
     STUDENT_ID_EXISTS: 2006, // 学号已被绑定
     BIND_STUDENT_ID_ERROR: 2007, // 绑定学号失败
+    STUDENT_ID_ALREADY_BOUND: 2008, // 学号已绑定，无法重复绑定
+    USERNAME_EXISTS: 2009, // 用户名已存在
+    STUDENT_ID_CHANGE_REQUEST_ERROR: 2010, // 学号改绑申请失败
+    STUDENT_ID_CHANGE_REQUEST_EXISTS: 2011, // 已存在待处理改绑申请
+    PHONE_CHANGE_REQUEST_ERROR: 2012, // 手机号改绑申请失败
+    STUDENT_ID_CHANGE_REQUEST_NOT_FOUND: 2013, // 改绑申请不存在
+    PHONE_CHANGE_REQUEST_EXISTS: 2014, // 已存在手机号改绑申请
+    PHONE_ALREADY_EXISTS: 2015, // 手机号已被占用
+    STUDENT_ID_CHANGE_REQUEST_APPROVE_ERROR: 2016, // 批准改绑申请失败
+    STUDENT_ID_CHANGE_REQUEST_REJECT_ERROR: 2017, // 拒绝改绑申请失败
 
     // ==================== 用户相关错误 (3000-3999) ====================
     USER_NOT_FOUND: 3001, // 用户不存在
@@ -30,6 +40,8 @@ export const ErrorCodes = {
     GET_SETTINGS_ERROR: 3005, // 获取设置失败
     UPDATE_SETTINGS_ERROR: 3006, // 更新设置失败
     GET_FEEDBACK_ERROR: 3007, // 获取反馈失败
+    USER_BLACKLISTED: 3008, // 用户已被列入黑名单
+    CREDIT_SCORE_MAXED: 3009, // 信用分已达上限
 
     // ==================== 座位相关错误 (4000-4999) ====================
     SEAT_NOT_FOUND: 4001, // 座位不存在
@@ -38,6 +50,7 @@ export const ErrorCodes = {
     SEARCH_SEATS_ERROR: 4004, // 搜索座位失败
     INVALID_KEYWORD: 4005, // 关键词无效
     GET_SEAT_DETAILS_ERROR: 4006, // 获取座位详情失败
+    GET_CONFIG_ERROR: 4007, // 获取配置失败
 
     // ==================== 预约相关错误 (5000-5999) ====================
     BOOKING_CONFLICT: 5001, // 预约冲突
@@ -70,6 +83,10 @@ export const ErrorCodes = {
     ACTIVITY_FULL: 7008, // 活动人数已满
     NOT_JOINED: 7009, // 未报名活动
     CANCEL_JOIN_ERROR: 7010, // 取消报名失败
+    ACTIVITY_NOT_STARTED: 7011, // 活动未开始
+    ACTIVITY_CHECKIN_ERROR: 7012, // 活动签到失败
+    ACTIVITY_CHECKOUT_ERROR: 7013, // 活动签退失败
+    ACTIVITY_NOT_SIGNED_IN: 7014, // 未签到活动
 
     // ==================== 反馈相关错误 (8000-8999) ====================
     FEEDBACK_NOT_FOUND: 8001, // 反馈不存在

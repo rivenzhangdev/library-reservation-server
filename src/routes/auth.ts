@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import Router from 'koa-router';
 import { authMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
-import { User } from '../models/mongodb';
+import { User, PhoneChangeRequest } from '../models/mongodb';
 import { ErrorCodes } from '../utils/error-codes';
 import { Roles } from '../constants/roles';
 import { normalizeUploadUrl } from '../utils/upload';
@@ -17,6 +17,26 @@ const router = new Router({ prefix: '/api/auth' });
 const JWT_SECRET = process.env.JWT_SECRET ?? 'default_secret';
 const WX_APP_ID = process.env.WX_APP_ID;
 const WX_APP_SECRET = process.env.WX_APP_SECRET;
+
+async function makeWeChatUsername(base: string) {
+    const prefix = '微信用户';
+    const suffix = String(base)
+        .slice(-6)
+        .replace(/[^a-zA-Z0-9]/g, '');
+    let username = `${prefix}${suffix || String(Date.now()).slice(-6)}`;
+    let exists = await User.findOne({ username });
+    let attempt = 0;
+    while (exists && attempt < 10) {
+        const randomSuffix = Math.floor(Math.random() * 9000 + 1000);
+        username = `${prefix}${suffix || '用户'}${randomSuffix}`;
+        exists = await User.findOne({ username });
+        attempt += 1;
+    }
+    if (exists) {
+        username = `${prefix}${Date.now()}`;
+    }
+    return username;
+}
 
 /**
  * @swagger
@@ -152,16 +172,20 @@ router.post('/wxlogin', async (ctx) => {
             session = await getWechatSession(code);
         }
 
-        // Find or create user using openid
-        let user = await User.findOne({ username: session.openid });
+        // Find or create user using openid or legacy username=openid
+        let user = await User.findOne({
+            $or: [{ openid: session.openid }, { username: session.openid }],
+        });
+
+        const generatedUsername = await makeWeChatUsername(session.openid);
 
         if (!user) {
-            // Create new user
             user = new User({
-                username: session.openid,
+                username: generatedUsername,
+                openid: session.openid,
                 password: await bcrypt.hash(session.openid, 10),
                 avatar: userInfo?.avatarUrl,
-                name: userInfo?.nickName ?? 'WeChat User',
+                name: '',
                 role: Roles.USER,
                 creditScore: 100,
                 studentId: null,
@@ -169,16 +193,22 @@ router.post('/wxlogin', async (ctx) => {
             });
 
             await user.save();
-            console.log(`✅ New user registered: ${session.openid}`);
+            console.log(`✅ New user registered: ${generatedUsername}`);
         } else {
-            // Update user information
             let needUpdate = false;
-            if (userInfo?.avatarUrl && userInfo.avatarUrl !== user.avatar) {
-                user.avatar = userInfo.avatarUrl;
+            if (!user.openid) {
+                user.openid = session.openid;
                 needUpdate = true;
             }
-            if (userInfo?.nickName && userInfo.nickName !== user.name) {
-                user.name = userInfo.nickName;
+            if (user.username === session.openid) {
+                user.username = generatedUsername;
+                needUpdate = true;
+            }
+            if (
+                userInfo?.avatarUrl &&
+                (!user.avatar || user.avatar === userInfo.avatarUrl)
+            ) {
+                user.avatar = userInfo.avatarUrl;
                 needUpdate = true;
             }
             if (needUpdate) {
@@ -201,13 +231,13 @@ router.post('/wxlogin', async (ctx) => {
         // Set HttpOnly cookie for browser-based clients (admin UI)
         try {
             const COOKIE_SAME_SITE = (
-                process.env.COOKIE_SAME_SITE || 'lax'
+                process.env.COOKIE_SAME_SITE ?? 'lax'
             ).toLowerCase();
             const COOKIE_SECURE =
                 process.env.COOKIE_SECURE !== undefined
                     ? process.env.COOKIE_SECURE === 'true'
                     : process.env.NODE_ENV === 'production';
-            const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || undefined;
+            const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN ?? undefined;
 
             if (COOKIE_SAME_SITE === 'none' && !COOKIE_SECURE) {
                 console.warn(
@@ -223,23 +253,30 @@ router.post('/wxlogin', async (ctx) => {
                 path: '/',
                 domain: COOKIE_DOMAIN,
             });
-        } catch (e) {
+        } catch {
             // ignore cookie set failures in non-browser environments
         }
 
         // Return user information
+        const avatarUrl = user.avatar
+            ? normalizeUploadUrl(String(user.avatar), ctx.origin)
+            : undefined;
+
         ctx.body = {
             success: true,
             data: {
                 token,
                 userInfo: {
                     id: user._id,
+                    username: user.username,
                     nickName: user.name,
-                    avatarUrl: normalizeUploadUrl(String(user.avatar || '')),
+                    avatarUrl,
                     studentId: user.studentId,
                     creditScore: user.creditScore,
                     isBindStudentId: !!user.studentId,
                     role: user.role,
+                    blacklisted: !!user.blacklisted,
+                    blacklistReason: user.blacklistReason ?? undefined,
                 },
             },
         };
@@ -267,6 +304,18 @@ router.post('/bindStudentId', authMiddleware, async (ctx) => {
             throw new CustomError(
                 'Student ID and real name are required',
                 ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        const currentUser = await User.findById(userId);
+        if (!currentUser) {
+            throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
+        }
+
+        if (currentUser.studentId) {
+            throw new CustomError(
+                'Student ID already bound. Submit a change request if needed.',
+                ErrorCodes.STUDENT_ID_ALREADY_BOUND
             );
         }
 
@@ -305,6 +354,87 @@ router.post('/bindStudentId', authMiddleware, async (ctx) => {
     }
 });
 
+router.post('/phone-change-requests', authMiddleware, async (ctx) => {
+    try {
+        const userId = (ctx as any).state.user.id;
+        const { newPhone, reason } = ctx.request.body as any;
+
+        const normalizedPhone = String(newPhone ?? '').trim();
+        if (!/^1\d{10}$/.test(normalizedPhone)) {
+            throw new CustomError(
+                'Please provide a valid 11-digit phone number',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        const user = await User.findById(userId);
+        if (!user) {
+            throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
+        }
+
+        if (!user.phone) {
+            throw new CustomError(
+                'Please bind a phone number first before requesting a change',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        if (user.phone === normalizedPhone) {
+            throw new CustomError(
+                'New phone must differ from the current phone',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        const existingRequest = await PhoneChangeRequest.findOne({
+            userId,
+            status: 'pending',
+        });
+        if (existingRequest) {
+            throw new CustomError(
+                'There is already a pending phone change request',
+                ErrorCodes.PHONE_CHANGE_REQUEST_EXISTS
+            );
+        }
+
+        const existingUserWithPhone = await User.findOne({
+            phone: normalizedPhone,
+            _id: { $ne: userId },
+        });
+        if (existingUserWithPhone) {
+            throw new CustomError(
+                'This phone number is already in use',
+                ErrorCodes.PHONE_ALREADY_EXISTS
+            );
+        }
+
+        const request = new PhoneChangeRequest({
+            userId,
+            oldPhone: user.phone,
+            newPhone: normalizedPhone,
+            reason: String(reason ?? '').trim(),
+            status: 'pending',
+        });
+
+        await request.save();
+
+        ctx.body = {
+            success: true,
+            data: {
+                id: request._id,
+                status: request.status,
+            },
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        console.error('Create phone change request failed', error);
+        throw new CustomError(
+            'Failed to submit phone change request',
+            ErrorCodes.PHONE_CHANGE_REQUEST_ERROR
+        );
+    }
+});
+
 /**
  * @route GET /api/auth/check
  * @desc Check login status interface
@@ -319,9 +449,17 @@ router.get('/check', authMiddleware, async (ctx) => {
             throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
         }
 
+        const normalizedAvatar = user.avatar
+            ? normalizeUploadUrl(String(user.avatar), ctx.origin)
+            : undefined;
+
         ctx.body = {
             success: true,
-            data: user,
+            data: {
+                ...user.toObject(),
+                avatar: normalizedAvatar,
+                avatarUrl: normalizedAvatar,
+            },
         };
     } catch (error: any) {
         if (error.isCustom) throw error;

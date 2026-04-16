@@ -16,12 +16,30 @@ import {
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { Booking, Floor, Seat, TimeSlotStatus } from '../models/mysql';
-import { Op } from 'sequelize';
+import sequelize from '../database/mysql';
+import { Op, Transaction } from 'sequelize';
 import { BookingStatus, TimeSlotStatusValue } from '../models/mysql/types';
 import { ErrorCodes } from '../utils/error-codes';
+import { buildAuditFields, buildUpdatedBy } from '../utils/audit';
 import { normalizeUploadUrl, saveBase64Image } from '../utils/upload';
 import { compareFloorName } from '../utils/floor-order';
 import { normalizeSeatStatus } from '../utils/seat-status';
+import {
+    normalizeNumericEnum,
+    normalizeSeatType,
+} from '../utils/enum-normalizers';
+import {
+    markAllExpiredBookings,
+    releaseBookingTimeSlot,
+    expireBookingIfNeeded,
+    performBookingCheckin,
+    performBookingCheckout,
+} from './booking';
+import { resolveTimeSlot } from '../utils/time-slot-config';
+import {
+    parseLocalDate,
+    validateBookingTimeRange,
+} from '../utils/booking-rules';
 
 const router = new Router({ prefix: '/api' });
 
@@ -33,6 +51,12 @@ function requireAdmin(ctx: any) {
     if (user?.role !== Roles.ADMIN) {
         throw new CustomError('Forbidden', ErrorCodes.FORBIDDEN);
     }
+    if (user?.isSuperAdmin && !['GET', 'HEAD'].includes(ctx.method)) {
+        throw new CustomError(
+            'Super admin account is read-only',
+            ErrorCodes.FORBIDDEN
+        );
+    }
 }
 
 function toAuditId(value: any) {
@@ -42,6 +66,42 @@ function toAuditId(value: any) {
     }
     return String(value);
 }
+
+function parsePagination(query: any) {
+    const pageParam = query.page ?? query.current;
+    const limitParam = query.limit ?? query.pageSize;
+    const pageNum = parseInt(String(pageParam ?? 1), 10);
+    const pageLimit = parseInt(String(limitParam ?? 20), 10);
+    return {
+        pageNum: Number.isNaN(pageNum) ? 1 : pageNum,
+        pageLimit: Number.isNaN(pageLimit) ? 20 : pageLimit,
+    };
+}
+
+function normalizeBooleanFlag(value: any) {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value === 1;
+    if (typeof value !== 'string') return false;
+    const normalized = value.trim().toLowerCase();
+    return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
+
+function isProtectedSuperAdmin(user: any) {
+    return !!(user && user.isSuperAdmin);
+}
+
+function assertNotProtectedSuperAdmin(user: any) {
+    if (isProtectedSuperAdmin(user)) {
+        throw new CustomError(
+            'Operation not allowed on super admin',
+            ErrorCodes.FORBIDDEN
+        );
+    }
+}
+
+const VIOLATION_DEDUCT_POINTS = Number(
+    process.env.VIOLATION_DEDUCT_POINTS || 5
+);
 
 function getDisplayName(value: any, userMap: Record<string, any>) {
     if (!value) return undefined;
@@ -61,10 +121,9 @@ function getDisplayName(value: any, userMap: Record<string, any>) {
 router.get('/bookings', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
+        await markAllExpiredBookings();
         const {
             status,
-            page = 1,
-            limit = 20,
             q,
             from,
             date,
@@ -148,8 +207,7 @@ router.get('/bookings', authMiddleware, async (ctx) => {
             }
         }
 
-        const pageNum = parseInt(page as string);
-        const pageLimit = parseInt(limit as string);
+        const { pageNum, pageLimit } = parsePagination(ctx.query);
 
         const { count, rows } = await Booking.findAndCountAll({
             where,
@@ -206,14 +264,19 @@ router.get('/bookings', authMiddleware, async (ctx) => {
             const userIdStr = booking.userId
                 ? String(booking.userId)
                 : undefined;
+            const seat = (booking as any).seat;
+            const seatName = seat?.name
+                ? String(seat.name)
+                : `R${seat?.rowNum || 0}C${seat?.colNum || 0}`;
             return {
                 id: booking.id,
                 seatId: booking.seatId,
-                floorName: (booking as any).seat?.floor?.name ?? '',
-                rowNum: (booking as any).seat?.rowNum ?? 0,
-                colNum: (booking as any).seat?.colNum ?? 0,
-                zone: (booking as any).seat?.zone ?? '',
-                type: (booking as any).seat?.type ?? '',
+                seatName,
+                floorName: seat?.floor?.name ?? '',
+                rowNum: seat?.rowNum ?? 0,
+                colNum: seat?.colNum ?? 0,
+                zone: seat?.zone ?? '',
+                type: seat?.type ?? '',
                 date: booking.date,
                 timeSlot: booking.timeSlot,
                 startTime: booking.startTime,
@@ -312,21 +375,31 @@ router.get('/bookings/:id', authMiddleware, async (ctx) => {
             ? String((booking as any).updatedBy)
             : undefined;
 
+        const seat = (booking as any).seat;
+        const seatName = seat?.name
+            ? String(seat.name)
+            : `R${seat?.rowNum ?? 0}C${seat?.colNum ?? 0}`;
         ctx.body = {
             success: true,
             data: {
                 id: booking.id,
                 seatId: booking.seatId,
-                floorName: (booking as any).seat?.floor?.name ?? '',
-                rowNum: (booking as any).seat?.rowNum ?? 0,
-                colNum: (booking as any).seat?.colNum ?? 0,
-                zone: (booking as any).seat?.zone ?? '',
-                type: (booking as any).seat?.type ?? '',
+                seatName,
+                floorName: seat?.floor?.name ?? '',
+                rowNum: seat?.rowNum ?? 0,
+                colNum: seat?.colNum ?? 0,
+                zone: seat?.zone ?? '',
+                type: seat?.type ?? '',
                 date: booking.date,
                 timeSlot: booking.timeSlot,
                 startTime: booking.startTime,
                 endTime: booking.endTime,
                 status: booking.status,
+                userId: booking.userId,
+                userName: booking.userId
+                    ? uMap[String(booking.userId)]?.username ||
+                      uMap[String(booking.userId)]?.name
+                    : undefined,
                 createdAt: (booking as any).created_at,
                 updatedAt: (booking as any).updated_at,
                 createdBy: createdById,
@@ -390,7 +463,76 @@ router.post('/bookings/cancel/:id', authMiddleware, async (ctx) => {
     }
 });
 
-router.delete('/bookings/:id', authMiddleware, async (ctx) => {
+export async function adminCheckinBooking(ctx: any) {
+    try {
+        requireAdmin(ctx);
+        await markAllExpiredBookings();
+        const bookingId = ctx.params.id;
+
+        const booking = await Booking.findOne({
+            where: { id: bookingId },
+        });
+
+        if (!booking)
+            throw new CustomError(
+                'Booking not found',
+                ErrorCodes.BOOKING_NOT_FOUND
+            );
+
+        await compatRouteDependencies.performBookingCheckin(
+            booking,
+            (ctx as any).state.user.id,
+            CreditRecord
+        );
+
+        ctx.body = { success: true };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to check in booking',
+            ErrorCodes.CHECKIN_ERROR
+        );
+    }
+}
+
+router.post('/bookings/checkin/:id', authMiddleware, adminCheckinBooking);
+
+export async function adminCheckoutBooking(ctx: any) {
+    try {
+        requireAdmin(ctx);
+        await markAllExpiredBookings();
+        const bookingId = ctx.params.id;
+
+        const booking = await Booking.findOne({
+            where: { id: bookingId },
+        });
+
+        if (!booking)
+            throw new CustomError(
+                'Booking not found',
+                ErrorCodes.BOOKING_NOT_FOUND
+            );
+
+        await compatRouteDependencies.performBookingCheckout(
+            booking,
+            (ctx as any).state.user.id,
+            compatRouteDependencies.releaseBookingTimeSlot,
+            compatRouteDependencies.expireBookingIfNeeded
+        );
+
+        ctx.body = { success: true };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to check out booking',
+            ErrorCodes.CHECKIN_ERROR
+        );
+    }
+}
+
+router.post('/bookings/checkout/:id', authMiddleware, adminCheckoutBooking);
+
+export async function adminDeleteBooking(ctx: any) {
     try {
         const bookingId = ctx.params.id;
         const user = (ctx as any).state.user;
@@ -407,18 +549,7 @@ router.delete('/bookings/:id', authMiddleware, async (ctx) => {
             );
 
         await booking.destroy();
-
-        // release timeslot
-        await TimeSlotStatus.update(
-            { status: TimeSlotStatusValue.AVAILABLE, bookingId: undefined },
-            {
-                where: {
-                    seatId: booking.seatId,
-                    date: booking.date,
-                    timeSlot: booking.timeSlot,
-                },
-            }
-        );
+        await compatRouteDependencies.releaseBookingTimeSlot(booking);
 
         ctx.body = { success: true };
     } catch (error: any) {
@@ -428,7 +559,9 @@ router.delete('/bookings/:id', authMiddleware, async (ctx) => {
             ErrorCodes.CANCEL_BOOKING_ERROR
         );
     }
-});
+}
+
+router.delete('/bookings/:id', authMiddleware, adminDeleteBooking);
 
 // ---- Simple admin login compatibility (/api/login) ----
 router.post('/login', async (ctx) => {
@@ -471,12 +604,7 @@ router.post('/login', async (ctx) => {
             );
         }
 
-        const normalizeRole = (r: any) => {
-            if (typeof r === 'number') return r;
-            return Roles.USER;
-        };
-
-        const roleForToken = normalizeRole(user.role);
+        const roleForToken = user.role;
 
         const token = jwt.sign(
             {
@@ -512,27 +640,21 @@ router.post('/login', async (ctx) => {
 router.get('/seat/list', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const {
-            floorId,
-            keyword,
-            q,
-            status,
-            type,
-            page = 1,
-            limit = 20,
-        } = ctx.query as any;
-        const pageNum = parseInt(page as string);
-        const pageLimit = parseInt(limit as string);
+        const { floorId, keyword, q, status, type } = ctx.query as any;
+        const { pageNum, pageLimit } = parsePagination(ctx.query);
         const where: any = {};
         if (floorId) where.floorId = floorId;
         if (typeof status !== 'undefined' && status !== '') {
-            const parsedStatus = Number(status);
-            if (!Number.isNaN(parsedStatus)) {
+            const parsedStatus = normalizeNumericEnum(status);
+            if (parsedStatus !== undefined) {
                 where.status = parsedStatus;
             }
         }
         if (typeof type !== 'undefined' && type !== '') {
-            where.type = type;
+            const parsedType = normalizeSeatType(type);
+            if (parsedType !== undefined) {
+                where.type = parsedType;
+            }
         }
         const seats = await Seat.findAll({
             where,
@@ -705,12 +827,38 @@ router.post('/seat', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
         const data = ctx.request.body as any;
-        // Remove zoneId if present (column does not exist in DB)
+        if (data.zoneId) {
+            const zone = await Zone.findById(data.zoneId).lean();
+            if (!zone) {
+                throw new CustomError(
+                    'Zone not found',
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+            data.zone = zone.name;
+        }
         delete data.zoneId;
-        try {
-            const user = (ctx as any).state.user;
-            if (user?.id) data.createdBy = user.id;
-        } catch (e) {}
+        Object.assign(data, buildAuditFields(ctx));
+        const floor = await Floor.findByPk(data.floorId);
+        if (!floor) {
+            throw new CustomError(
+                'Floor not found',
+                ErrorCodes.FLOOR_NOT_FOUND
+            );
+        }
+        const existingCount = await Seat.count({
+            where: { floorId: floor.id },
+        });
+        if (existingCount >= floor.totalSeats) {
+            const availableCount = Math.max(
+                0,
+                floor.totalSeats - existingCount
+            );
+            throw new CustomError(
+                `Floor ${floor.name} already has the maximum number of seats (${floor.totalSeats}). ${existingCount} seats exist, ${availableCount} remaining.`,
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
         const seat = await Seat.create(data);
 
         // resolve createdBy/updatedBy display names
@@ -765,12 +913,18 @@ router.put('/seat/:id', authMiddleware, async (ctx) => {
         const seat = await Seat.findByPk(seatId);
         if (!seat)
             throw new CustomError('Seat not found', ErrorCodes.SEAT_NOT_FOUND);
-        // Remove zoneId if present (column does not exist in DB)
+        if (data.zoneId) {
+            const zone = await Zone.findById(data.zoneId).lean();
+            if (!zone) {
+                throw new CustomError(
+                    'Zone not found',
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+            data.zone = zone.name;
+        }
         delete data.zoneId;
-        try {
-            const user = (ctx as any).state.user;
-            if (user?.id) data.updatedBy = user.id;
-        } catch (e) {}
+        Object.assign(data, buildUpdatedBy(ctx));
         await seat.update(data);
 
         const seatPlain = (seat as any).get
@@ -910,13 +1064,7 @@ router.post('/floors', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
         const data = ctx.request.body as any;
-        try {
-            const user = (ctx as any).state.user;
-            if (user?.id) {
-                data.createdBy = user.id;
-                data.updatedBy = user.id;
-            }
-        } catch (e) {}
+        Object.assign(data, buildAuditFields(ctx));
         const floor = await Floor.create(data);
 
         const floorPlain = (floor as any).get
@@ -965,10 +1113,7 @@ router.put('/floors/:id', authMiddleware, async (ctx) => {
         requireAdmin(ctx);
         const id = ctx.params.id;
         const data = ctx.request.body as any;
-        try {
-            const user = (ctx as any).state.user;
-            if (user?.id) data.updatedBy = user.id;
-        } catch (e) {}
+        Object.assign(data, buildUpdatedBy(ctx));
         const floor = await Floor.findByPk(id);
         if (!floor)
             throw new CustomError(
@@ -1043,15 +1188,7 @@ router.delete('/floors/:id', authMiddleware, async (ctx) => {
 router.get('/activity/list', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const {
-            page = 1,
-            limit = 20,
-            q,
-            title,
-            floorId,
-            status,
-            startTime,
-        } = ctx.query as any;
+        const { q, title, floorId, status, startTime } = ctx.query as any;
 
         // Try populate first (for documents that reference User properly)
         let activities = await Activity.find()
@@ -1122,8 +1259,7 @@ router.get('/activity/list', authMiddleware, async (ctx) => {
             }
         }
 
-        const pageNum = parseInt(page as string);
-        const pageLimit = parseInt(limit as string);
+        const { pageNum, pageLimit } = parsePagination(ctx.query);
         const total = (activities || []).length;
         const pagedActivities = (activities || []).slice(
             (pageNum - 1) * pageLimit,
@@ -1133,16 +1269,13 @@ router.get('/activity/list', authMiddleware, async (ctx) => {
         // Collect any audit ids that still lack a display name (could be stored as plain id)
         const missingUserIds = new Set<string>();
         (pagedActivities || []).forEach((a: any) => {
-            // createdBy may be populated object or raw id
-            if (a.createdBy && !(a.createdBy.name || a.createdBy.username)) {
-                try {
-                    missingUserIds.add(String(a.createdBy));
-                } catch (e) {}
+            const createdById = toAuditId(a.createdBy);
+            const updatedById = toAuditId(a.updatedBy);
+            if (createdById && !(a.createdBy?.name || a.createdBy?.username)) {
+                missingUserIds.add(createdById);
             }
-            if (a.updatedBy && !(a.updatedBy.name || a.updatedBy.username)) {
-                try {
-                    missingUserIds.add(String(a.updatedBy));
-                } catch (e) {}
+            if (updatedById && !(a.updatedBy?.name || a.updatedBy?.username)) {
+                missingUserIds.add(updatedById);
             }
         });
 
@@ -1158,22 +1291,17 @@ router.get('/activity/list', authMiddleware, async (ctx) => {
             });
         }
 
-        const mapped = (pagedActivities || []).map((a: any) => ({
-            ...a,
-            createdByName:
-                a.createdBy?.username ||
-                a.createdBy?.name ||
-                userMap[String(a.createdBy)]?.username ||
-                userMap[String(a.createdBy)]?.name ||
-                undefined,
-            updatedBy: a.updatedBy?._id || a.updatedBy,
-            updatedByName:
-                a.updatedBy?.username ||
-                a.updatedBy?.name ||
-                userMap[String(a.updatedBy)]?.username ||
-                userMap[String(a.updatedBy)]?.name ||
-                undefined,
-        }));
+        const mapped = (pagedActivities || []).map((a: any) => {
+            const createdById = toAuditId(a.createdBy);
+            const updatedById = toAuditId(a.updatedBy);
+            return {
+                ...a,
+                createdBy: createdById,
+                createdByName: getDisplayName(a.createdBy, userMap),
+                updatedBy: updatedById,
+                updatedByName: getDisplayName(a.updatedBy, userMap),
+            };
+        });
 
         ctx.body = { success: true, data: { list: mapped, total } };
     } catch (error: any) {
@@ -1190,8 +1318,6 @@ router.get('/user/list', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
         const {
-            page = 1,
-            limit = 20,
             q,
             blacklisted,
             role,
@@ -1199,8 +1325,7 @@ router.get('/user/list', authMiddleware, async (ctx) => {
             minCreditScore,
             maxCreditScore,
         } = ctx.query as any;
-        const pageNum = parseInt(page as string);
-        const pageLimit = parseInt(limit as string);
+        const { pageNum, pageLimit } = parsePagination(ctx.query);
         const filter: any = {};
         if (q) {
             filter.$or = [
@@ -1211,77 +1336,69 @@ router.get('/user/list', authMiddleware, async (ctx) => {
         }
 
         if (typeof blacklisted !== 'undefined') {
-            const isBlacklisted = Number(blacklisted) === 1;
-            filter.blacklisted = isBlacklisted;
+            filter.blacklisted = normalizeBooleanFlag(blacklisted);
         }
 
         if (typeof role !== 'undefined' && role !== null && role !== '') {
             const parsedRole = Number(role);
             if (!Number.isNaN(parsedRole)) {
                 filter.role = parsedRole;
-            } else if (typeof role === 'string') {
-                const lower = role.toLowerCase();
-                if (lower === 'admin') filter.role = Roles.ADMIN;
-                else if (lower === 'user') filter.role = Roles.USER;
             }
         }
 
+        const hasMinCreditScore =
+            typeof minCreditScore !== 'undefined' &&
+            minCreditScore !== null &&
+            minCreditScore !== '';
+        const hasMaxCreditScore =
+            typeof maxCreditScore !== 'undefined' &&
+            maxCreditScore !== null &&
+            maxCreditScore !== '';
+        const parsedScore = Number(creditScore);
         if (
             typeof creditScore !== 'undefined' &&
             creditScore !== null &&
-            creditScore !== ''
+            creditScore !== '' &&
+            !hasMinCreditScore &&
+            !hasMaxCreditScore
         ) {
-            const parsedScore = Number(creditScore);
             if (!Number.isNaN(parsedScore)) {
                 filter.creditScore = parsedScore;
             }
         }
 
-        if (
-            (typeof minCreditScore !== 'undefined' &&
-                minCreditScore !== null &&
-                minCreditScore !== '') ||
-            (typeof maxCreditScore !== 'undefined' &&
-                maxCreditScore !== null &&
-                maxCreditScore !== '')
-        ) {
-            filter.creditScore = filter.creditScore || {};
-            if (
-                typeof minCreditScore !== 'undefined' &&
-                minCreditScore !== null &&
-                minCreditScore !== ''
-            ) {
+        if (hasMinCreditScore || hasMaxCreditScore) {
+            const range: any = {};
+            if (hasMinCreditScore) {
                 const minScore = Number(minCreditScore);
                 if (!Number.isNaN(minScore)) {
-                    filter.creditScore.$gte = minScore;
+                    range.$gte = minScore;
                 }
             }
-            if (
-                typeof maxCreditScore !== 'undefined' &&
-                maxCreditScore !== null &&
-                maxCreditScore !== ''
-            ) {
+            if (hasMaxCreditScore) {
                 const maxScore = Number(maxCreditScore);
                 if (!Number.isNaN(maxScore)) {
-                    filter.creditScore.$lte = maxScore;
+                    range.$lte = maxScore;
                 }
+            }
+            if (Object.keys(range).length > 0) {
+                filter.creditScore = range;
             }
         }
 
+        filter.$and = [
+            { isSuperAdmin: { $ne: true } },
+            { username: { $ne: 'ray.zhang' } },
+        ];
         const total = await User.countDocuments(filter);
         let list = await User.find(filter)
             .skip((pageNum - 1) * pageLimit)
             .limit(pageLimit)
             .lean();
 
-        const normalizeRoleValue = (r: any) => {
-            if (typeof r === 'number') return r;
-            return Roles.USER;
-        };
-
         list = (list || []).map((u: any) => ({
             ...u,
-            role: normalizeRoleValue(u.role),
+            isSuperAdmin: undefined,
             avatar: normalizeUploadUrl(String(u.avatar || ''), ctx.origin),
         }));
 
@@ -1301,6 +1418,10 @@ router.get('/user/:id', authMiddleware, async (ctx) => {
         const user = await User.findById(id).select('-password').lean();
         if (!user)
             throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
+        if (user.isSuperAdmin && String(ctx.state.user.id) !== String(id)) {
+            throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
+        }
+        delete user.isSuperAdmin;
         user.avatar = normalizeUploadUrl(String(user.avatar || ''), ctx.origin);
         ctx.body = { success: true, data: user };
     } catch (error: any) {
@@ -1313,6 +1434,7 @@ router.post('/user', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
         const data = ctx.request.body as any;
+        delete data.isSuperAdmin;
         if (data.password) {
             // hash password
             // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1376,7 +1498,16 @@ router.put('/user/:id', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
         const id = ctx.params.id;
+        const targetUser = await User.findById(id)
+            .select('isSuperAdmin')
+            .lean();
+        if (targetUser) {
+            assertNotProtectedSuperAdmin(targetUser);
+        }
         const data = ctx.request.body as any;
+        if (data.isSuperAdmin !== undefined) {
+            delete data.isSuperAdmin;
+        }
         if (data.password) {
             const bcrypt = require('bcryptjs');
             data.password = await bcrypt.hash(data.password, 10);
@@ -1387,6 +1518,14 @@ router.put('/user/:id', authMiddleware, async (ctx) => {
             typeof data.role !== 'number'
         ) {
             delete data.role;
+        }
+        if (data.creditScore !== undefined && data.creditScore !== null) {
+            const normalizedScore = Number(data.creditScore);
+            if (!Number.isFinite(normalizedScore)) {
+                delete data.creditScore;
+            } else {
+                data.creditScore = Math.min(100, Math.max(0, normalizedScore));
+            }
         }
         if (
             data.avatar &&
@@ -1421,6 +1560,12 @@ router.delete('/user/:id', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
         const id = ctx.params.id;
+        const targetUser = await User.findById(id)
+            .select('isSuperAdmin')
+            .lean();
+        if (targetUser) {
+            assertNotProtectedSuperAdmin(targetUser);
+        }
         await User.findByIdAndDelete(id);
         ctx.body = { success: true };
     } catch (error: any) {
@@ -1436,9 +1581,15 @@ router.put('/user/status/:id', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
         const id = ctx.params.id;
+        const targetUser = await User.findById(id)
+            .select('isSuperAdmin')
+            .lean();
+        if (targetUser) {
+            assertNotProtectedSuperAdmin(targetUser);
+        }
         const { status, reason } = ctx.request.body as any;
         const update: any = {};
-        const isBlacklisted = Number(status) === 1;
+        const isBlacklisted = normalizeBooleanFlag(status);
         if (isBlacklisted) {
             update.blacklisted = true;
             if (reason) update.blacklistReason = reason;
@@ -1468,9 +1619,18 @@ router.put('/user/batch/status', authMiddleware, async (ctx) => {
         const { userIds, status } = ctx.request.body as any;
         if (!Array.isArray(userIds))
             throw new CustomError('Invalid params', ErrorCodes.INVALID_PARAMS);
+        const protectedCount = await User.countDocuments({
+            _id: { $in: userIds },
+            isSuperAdmin: true,
+        });
+        if (protectedCount > 0) {
+            throw new CustomError(
+                'Operation not allowed on super admin',
+                ErrorCodes.FORBIDDEN
+            );
+        }
         const update: any = {};
-        const isBlacklisted = Number(status) === 1;
-        update.blacklisted = isBlacklisted;
+        update.blacklisted = normalizeBooleanFlag(status);
         await User.updateMany({ _id: { $in: userIds } }, { $set: update });
         ctx.body = { success: true };
     } catch (error: any) {
@@ -1486,9 +1646,8 @@ router.put('/user/batch/status', authMiddleware, async (ctx) => {
 router.get('/zones', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const { page = 1, limit = 20, q } = ctx.query as any;
-        const pageNum = parseInt(page as string);
-        const pageLimit = parseInt(limit as string);
+        const { q } = ctx.query as any;
+        const { pageNum, pageLimit } = parsePagination(ctx.query);
         const filter: any = {};
         if (q) filter.name = { $regex: q, $options: 'i' };
 
@@ -1521,13 +1680,7 @@ router.post('/zones', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
         const data = ctx.request.body as any;
-        try {
-            const user = (ctx as any).state.user;
-            if (user?.id) {
-                data.createdBy = user.id;
-                data.updatedBy = user.id;
-            }
-        } catch (e) {}
+        Object.assign(data, buildAuditFields(ctx));
         const zone = new Zone(data);
         await zone.save();
 
@@ -1574,10 +1727,7 @@ router.put('/zones/:id', authMiddleware, async (ctx) => {
         requireAdmin(ctx);
         const id = ctx.params.id;
         const data = ctx.request.body as any;
-        try {
-            const user = (ctx as any).state.user;
-            if (user?.id) data.updatedBy = user.id;
-        } catch (e) {}
+        Object.assign(data, buildUpdatedBy(ctx));
         const zone: any = await Zone.findByIdAndUpdate(id, data, {
             new: true,
         })
@@ -1643,16 +1793,9 @@ router.put('/zones/batch/status', authMiddleware, async (ctx) => {
 router.post('/activity', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const data = ctx.request.body as any;
-        // Set createdBy from authenticated user
         const user = (ctx as any).state.user;
-        if (user?.id) {
-            data.createdBy = user.id;
-        }
-        // also mark updatedBy on creation
-        try {
-            if (user?.id) data.updatedBy = user.id;
-        } catch (e) {}
+        const data = ctx.request.body as any;
+        Object.assign(data, buildAuditFields(ctx));
         const activity = new Activity(data);
         await activity.save();
 
@@ -1701,13 +1844,7 @@ router.put('/activity/:id', authMiddleware, async (ctx) => {
         requireAdmin(ctx);
         const id = ctx.params.id;
         const data = ctx.request.body as any;
-        // mark updatedBy
-        try {
-            const user = (ctx as any).state.user;
-            if (user?.id) data.updatedBy = user.id;
-        } catch (e) {
-            // ignore
-        }
+        Object.assign(data, buildUpdatedBy(ctx));
         const activity = await Activity.findByIdAndUpdate(id, data, {
             new: true,
             runValidators: true,
@@ -1780,9 +1917,8 @@ router.post('/notification', authMiddleware, async (ctx) => {
         try {
             const user = (ctx as any).state.user;
             data.userId = user.id;
-            data.createdBy = user.id;
-            data.updatedBy = user.id;
         } catch (e) {}
+        Object.assign(data, buildAuditFields(ctx));
         const notification = new Notification(data);
         await notification.save();
 
@@ -1862,85 +1998,156 @@ router.post('/bookings', authMiddleware, async (ctx) => {
         let userId = data.userId;
         if (!userId && data.userName) {
             const targetUser = await User.findOne({ username: data.userName });
-            if (!targetUser)
+            if (!targetUser) {
                 throw new CustomError(
                     '找不到该用户',
                     ErrorCodes.INVALID_PARAMS
                 );
+            }
             userId = targetUser._id.toString();
         }
-        if (!userId)
+        if (!userId) {
             throw new CustomError('用户不能为空', ErrorCodes.INVALID_PARAMS);
+        }
 
         // Resolve seatId
         let seatId = data.seatId;
         if (!seatId && data.seatName) {
             seatId = parseInt(data.seatName, 10);
         }
-        if (!seatId)
+        if (!seatId) {
             throw new CustomError('座位不能为空', ErrorCodes.INVALID_PARAMS);
+        }
 
         // Validate seat exists to avoid FK errors
         const seat = await Seat.findByPk(seatId);
-        if (!seat)
+        if (!seat) {
             throw new CustomError('Seat not found', ErrorCodes.SEAT_NOT_FOUND);
+        }
 
-        // Format date
+        // Normalize and validate date
         let date = data.date;
         if (date && typeof date === 'object') {
             date = new Date(date).toISOString().split('T')[0];
         } else if (date && typeof date === 'string' && date.includes('T')) {
             date = date.split('T')[0];
         }
-
-        // timeSlot: accept string or number
-        let timeSlot = data.timeSlot;
-        if (typeof timeSlot === 'string') {
-            const tsMap: Record<string, number> = {
-                '0': 0,
-                '1': 1,
-                '2': 2,
-                morning: 0,
-                afternoon: 1,
-                evening: 2,
-            };
-            timeSlot = tsMap[timeSlot.toLowerCase()] ?? parseInt(timeSlot, 10);
+        if (!date || typeof date !== 'string') {
+            throw new CustomError('Invalid date', ErrorCodes.INVALID_PARAMS);
         }
 
-        const currentAdminId = (ctx as any).state.user.id;
-        const booking = await Booking.create({
-            userId,
-            seatId,
-            date,
-            timeSlot,
-            startTime: data.startTime,
-            endTime: data.endTime,
-            status: BookingStatus.UPCOMING,
-            createdBy: currentAdminId,
-            updatedBy: currentAdminId,
-        });
+        const bookingDateString = String(date);
+        const bookingDate = parseLocalDate(bookingDateString);
+        if (!bookingDate) {
+            throw new CustomError('Invalid date', ErrorCodes.INVALID_PARAMS);
+        }
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const compareBookingDate = new Date(bookingDate);
+        compareBookingDate.setHours(0, 0, 0, 0);
+        if (compareBookingDate.getTime() < today.getTime()) {
+            throw new CustomError(
+                'Cannot create booking in the past',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        // timeSlot: accept numeric enum, label, or configured value
+        const timeSlot = await resolveTimeSlot(data.timeSlot);
+        if (timeSlot === undefined) {
+            throw new CustomError(
+                'Invalid timeSlot',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        const startTime = data.startTime;
+        const endTime = data.endTime;
+        const { startTime: finalStartTime, endTime: finalEndTime } =
+            await validateBookingTimeRange({
+                date: bookingDateString,
+                timeSlot,
+                startTime,
+                endTime,
+            });
+
+        // expire stale bookings before checking availability, to avoid holding slots forever
+        await markAllExpiredBookings();
 
         const existingStatus = await TimeSlotStatus.findOne({
             where: {
                 seatId,
-                date,
+                date: bookingDateString as any,
                 timeSlot,
             },
         });
-        if (existingStatus) {
-            await existingStatus.update({
-                status: TimeSlotStatusValue.BOOKED,
-                bookingId: booking.id,
-            });
-        } else {
-            await TimeSlotStatus.create({
-                seatId,
-                date,
-                timeSlot,
-                status: TimeSlotStatusValue.BOOKED,
-                bookingId: booking.id,
-            });
+
+        if (existingStatus?.status === TimeSlotStatusValue.BOOKED) {
+            throw new CustomError(
+                'This time slot has been booked',
+                ErrorCodes.BOOKING_CONFLICT
+            );
         }
+
+        const existingBooking = await Booking.findOne({
+            where: {
+                userId: userId.toString(),
+                date: bookingDateString as any,
+                timeSlot,
+                status: {
+                    [Op.in]: [BookingStatus.UPCOMING, BookingStatus.ONGOING],
+                },
+            },
+        });
+
+        if (existingBooking) {
+            throw new CustomError(
+                'User already has a booking for this time slot',
+                ErrorCodes.BOOKING_CONFLICT
+            );
+        }
+
+        const currentAdminId = (ctx as any).state.user.id;
+        const booking = await sequelize.transaction(async (t: Transaction) => {
+            const createdBooking = await Booking.create(
+                {
+                    userId,
+                    seatId,
+                    date: bookingDateString as any,
+                    timeSlot,
+                    startTime: finalStartTime as any,
+                    endTime: finalEndTime as any,
+                    status: BookingStatus.UPCOMING,
+                    createdBy: currentAdminId,
+                    updatedBy: currentAdminId,
+                },
+                { transaction: t }
+            );
+
+            if (existingStatus) {
+                await existingStatus.update(
+                    {
+                        status: TimeSlotStatusValue.BOOKED,
+                        bookingId: createdBooking.id,
+                    },
+                    { transaction: t }
+                );
+            } else {
+                await TimeSlotStatus.create(
+                    {
+                        seatId,
+                        date: bookingDateString as any,
+                        timeSlot,
+                        status: TimeSlotStatusValue.BOOKED,
+                        bookingId: createdBooking.id,
+                    },
+                    { transaction: t }
+                );
+            }
+
+            return createdBooking;
+        });
 
         // Resolve display names for createdBy/updatedBy/userId
         const bCreatedBy = booking.createdBy
@@ -2000,15 +2207,91 @@ router.put('/bookings/batch/cancel', authMiddleware, async (ctx) => {
         const { bookingIds } = ctx.request.body as any;
         if (!Array.isArray(bookingIds))
             throw new CustomError('Invalid params', ErrorCodes.INVALID_PARAMS);
-        await Booking.update(
-            { status: BookingStatus.CANCELED },
-            { where: { id: bookingIds } }
-        );
+
+        await sequelize.transaction(async (t: Transaction) => {
+            await Booking.update(
+                { status: BookingStatus.CANCELED },
+                { where: { id: bookingIds }, transaction: t }
+            );
+            await TimeSlotStatus.update(
+                {
+                    status: TimeSlotStatusValue.AVAILABLE,
+                    bookingId: undefined,
+                },
+                {
+                    where: { bookingId: bookingIds },
+                    transaction: t,
+                }
+            );
+        });
+
         ctx.body = { success: true };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError(
             'Failed to batch cancel bookings',
+            ErrorCodes.INTERNAL_ERROR
+        );
+    }
+});
+
+router.put('/bookings/status/:id', authMiddleware, async (ctx) => {
+    try {
+        requireAdmin(ctx);
+        const bookingId = ctx.params.id;
+        const { status } = ctx.request.body as any;
+
+        const newStatus = normalizeNumericEnum(status);
+        if (newStatus === undefined) {
+            throw new CustomError('Invalid status', ErrorCodes.INVALID_PARAMS);
+        }
+
+        const booking = await Booking.findByPk(bookingId);
+        if (!booking) {
+            throw new CustomError(
+                'Booking not found',
+                ErrorCodes.BOOKING_NOT_FOUND
+            );
+        }
+
+        await sequelize.transaction(async (t: Transaction) => {
+            await booking.update(
+                {
+                    status: newStatus,
+                    ...buildUpdatedBy(ctx),
+                },
+                { transaction: t }
+            );
+
+            if (
+                [
+                    BookingStatus.CANCELED,
+                    BookingStatus.COMPLETED,
+                    BookingStatus.VIOLATED,
+                ].includes(newStatus)
+            ) {
+                await TimeSlotStatus.update(
+                    {
+                        status: TimeSlotStatusValue.AVAILABLE,
+                        bookingId: undefined,
+                    },
+                    {
+                        where: {
+                            seatId: booking.seatId,
+                            date: booking.date,
+                            timeSlot: booking.timeSlot,
+                        },
+                        transaction: t,
+                    }
+                );
+            }
+        });
+
+        ctx.body = { success: true };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to update booking status',
             ErrorCodes.INTERNAL_ERROR
         );
     }
@@ -2099,6 +2382,44 @@ router.post('/seat/batch', authMiddleware, async (ctx) => {
         });
 
         if (toCreate.length) {
+            const seatsByFloor = toCreate.reduce(
+                (groups: Record<number, any[]>, seat) => {
+                    const floorId = Number(seat.floorId);
+                    groups[floorId] = groups[floorId] || [];
+                    groups[floorId].push(seat);
+                    return groups;
+                },
+                {} as Record<number, any[]>
+            );
+
+            const floorIds = Object.keys(seatsByFloor).map((id) => Number(id));
+            const floors = await Floor.findAll({ where: { id: floorIds } });
+            const floorMap = new Map<number, any>();
+            floors.forEach((floor) => floorMap.set(floor.id, floor));
+
+            for (const [floorIdStr, seatList] of Object.entries(seatsByFloor)) {
+                const floorId = Number(floorIdStr);
+                const floor = floorMap.get(floorId);
+                if (!floor) {
+                    throw new CustomError(
+                        `Floor ${floorId} not found`,
+                        ErrorCodes.INVALID_PARAMS
+                    );
+                }
+                const existingCount = await Seat.count({ where: { floorId } });
+                const newCount = seatList.length;
+                if (existingCount + newCount > floor.totalSeats) {
+                    const availableCount = Math.max(
+                        0,
+                        floor.totalSeats - existingCount
+                    );
+                    throw new CustomError(
+                        `Cannot create ${newCount} seats for floor ${floor.name}: ${existingCount} already exist, maximum ${floor.totalSeats} seats allowed. You can create up to ${availableCount} more seat(s).`,
+                        ErrorCodes.INVALID_PARAMS
+                    );
+                }
+            }
+
             await Seat.bulkCreate(toCreate, { ignoreDuplicates: true });
         }
 
@@ -2232,20 +2553,51 @@ router.post('/credit/add', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
         const { userId, points, reason } = ctx.request.body as any;
+        const pointValue = Number(points);
+        if (!Number.isFinite(pointValue) || pointValue <= 0) {
+            throw new CustomError('Invalid points', ErrorCodes.INVALID_PARAMS);
+        }
         const user = await User.findById(userId);
         if (!user)
             throw new CustomError('User not found', ErrorCodes.NOT_FOUND);
-        user.creditScore = (user.creditScore || 100) + Number(points);
+        const currentScore = user.creditScore || 100;
+        if (currentScore >= 100) {
+            throw new CustomError(
+                'Credit score is already at maximum',
+                ErrorCodes.CREDIT_SCORE_MAXED
+            );
+        }
+        if (currentScore + pointValue > 100) {
+            throw new CustomError(
+                'Cannot increase credit score beyond 100',
+                ErrorCodes.CREDIT_SCORE_MAXED
+            );
+        }
+        user.creditScore = currentScore + pointValue;
         await user.save();
         const currentUserId = (ctx as any).state.user.id;
-        await CreditRecord.create({
+        const creditRecord = await CreditRecord.create({
             userId,
             type: 0,
-            points: Number(points),
+            points: pointValue,
             reason: reason || '管理员加分',
             updatedBy: currentUserId,
         });
-        ctx.body = { success: true, data: { creditScore: user.creditScore } };
+        ctx.body = {
+            success: true,
+            data: {
+                creditScore: user.creditScore,
+                record: {
+                    id: creditRecord._id,
+                    userId: creditRecord.userId,
+                    type: creditRecord.type,
+                    points: creditRecord.points,
+                    reason: creditRecord.reason,
+                    date: creditRecord.date,
+                    updatedBy: creditRecord.updatedBy,
+                },
+            },
+        };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError(
@@ -2268,14 +2620,28 @@ router.post('/credit/deduct', authMiddleware, async (ctx) => {
         );
         await user.save();
         const currentUserId = (ctx as any).state.user.id;
-        await CreditRecord.create({
+        const creditRecord = await CreditRecord.create({
             userId,
             type: 1,
             points: Number(points),
             reason: reason || '管理员扣分',
             updatedBy: currentUserId,
         });
-        ctx.body = { success: true, data: { creditScore: user.creditScore } };
+        ctx.body = {
+            success: true,
+            data: {
+                creditScore: user.creditScore,
+                record: {
+                    id: creditRecord._id,
+                    userId: creditRecord.userId,
+                    type: creditRecord.type,
+                    points: creditRecord.points,
+                    reason: creditRecord.reason,
+                    date: creditRecord.date,
+                    updatedBy: creditRecord.updatedBy,
+                },
+            },
+        };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError(
@@ -2306,9 +2672,7 @@ router.get('/credit/score/:userId', authMiddleware, async (ctx) => {
 router.get('/credit/blacklist', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const { page = 1, limit = 20 } = ctx.query as any;
-        const pageNum = parseInt(page as string);
-        const pageLimit = parseInt(limit as string);
+        const { pageNum, pageLimit } = parsePagination(ctx.query);
         const users = await User.find({ blacklisted: true })
             .skip((pageNum - 1) * pageLimit)
             .limit(pageLimit);
@@ -2443,14 +2807,27 @@ router.get('/statistics', authMiddleware, async (ctx) => {
         requireAdmin(ctx);
         const { Op } = require('sequelize');
 
+        const range = String(ctx.query.range || 'week');
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         const tomorrow = new Date(today);
         tomorrow.setDate(tomorrow.getDate() + 1);
 
-        // 7-day trend
+        let rangeStart = new Date(today);
+        let trendDays = 7;
+        if (range === 'week') {
+            rangeStart.setDate(today.getDate() - 6);
+            trendDays = 7;
+        } else if (range === 'month') {
+            rangeStart.setDate(today.getDate() - 29);
+            trendDays = 30;
+        } else {
+            rangeStart = new Date(today);
+            trendDays = 1;
+        }
+
         const trendData = [];
-        for (let i = 6; i >= 0; i--) {
+        for (let i = trendDays - 1; i >= 0; i--) {
             const d = new Date(today);
             d.setDate(d.getDate() - i);
             const next = new Date(d);
@@ -2463,6 +2840,10 @@ router.get('/statistics', authMiddleware, async (ctx) => {
                 bookings: count,
             });
         }
+
+        const rangeBookings = await Booking.count({
+            where: { date: { [Op.between]: [rangeStart, tomorrow] } },
+        });
 
         const totalBookings = await Booking.count();
         const completedBookings = await Booking.count({
@@ -2479,6 +2860,7 @@ router.get('/statistics', authMiddleware, async (ctx) => {
             success: true,
             data: {
                 trend: trendData,
+                rangeBookings,
                 totalBookings,
                 completedBookings,
                 canceledBookings,
@@ -2497,20 +2879,15 @@ router.get('/statistics', authMiddleware, async (ctx) => {
 // ---- Credit Records ----
 router.get('/user/credit/records', authMiddleware, async (ctx) => {
     try {
-        const {
-            page = 1,
-            limit = 20,
-            userId,
-            q,
-            type,
-            reason,
-        } = ctx.query as any;
-        const pageNum = parseInt(page as string);
-        const pageLimit = parseInt(limit as string);
+        const { userId, q, type, reason } = ctx.query as any;
+        const { pageNum, pageLimit } = parsePagination(ctx.query);
         const query: any = {};
         if (userId) query.userId = userId;
         if (type !== undefined && type !== null && type !== '') {
-            query.type = Number(type);
+            const normalizedType = normalizeNumericEnum(type);
+            if (normalizedType !== undefined) {
+                query.type = normalizedType;
+            }
         }
         if (reason) {
             query.reason = { $regex: reason, $options: 'i' };
@@ -2607,22 +2984,13 @@ router.get('/user/credit/records', authMiddleware, async (ctx) => {
 router.get('/violation/list', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const {
-            page = 1,
-            limit = 20,
-            userName,
-            studentId,
-            type,
-            date,
-            q,
-        } = ctx.query as any;
-        const pageNum = parseInt(page as string);
-        const pageLimit = parseInt(limit as string);
+        const { userName, studentId, type, date, q } = ctx.query as any;
+        const { pageNum, pageLimit } = parsePagination(ctx.query);
         const where: any = { status: BookingStatus.VIOLATED };
 
         if (typeof type !== 'undefined' && type !== '') {
-            const parsedType = Number(type);
-            if (!Number.isNaN(parsedType)) {
+            const parsedType = normalizeNumericEnum(type);
+            if (parsedType !== undefined) {
                 where.type = parsedType;
             } else {
                 where.type = type;
@@ -2690,17 +3058,37 @@ router.get('/violation/list', authMiddleware, async (ctx) => {
         });
 
         // Enrich with user info from MongoDB
+        const userIdsToFetch = new Set<string>();
+        rows.forEach((b: any) => {
+            if (b.userId) userIdsToFetch.add(String(b.userId));
+            if ((b as any).updatedBy)
+                userIdsToFetch.add(String((b as any).updatedBy));
+        });
+
+        const users = userIdsToFetch.size
+            ? await User.find({ _id: { $in: Array.from(userIdsToFetch) } })
+                  .select('name username studentId avatar')
+                  .lean()
+            : [];
+        const userMap: Record<string, any> = {};
+        users.forEach((u: any) => {
+            userMap[String(u._id)] = u;
+        });
+
         const list = await Promise.all(
             rows.map(async (b: any) => {
-                const user = await User.findById(b.userId).select(
-                    'name avatar username'
-                );
+                const user = userMap[String(b.userId)];
                 return {
                     id: b.id,
                     bookingId: b.id,
                     userId: b.userId,
                     userName: user?.username || user?.name || 'Unknown',
-                    userAvatar: user?.avatar || '',
+                    userAvatar:
+                        normalizeUploadUrl(
+                            String(user?.avatar || ''),
+                            ctx.origin
+                        ) || '',
+                    studentId: user?.studentId || '',
                     seatId: b.seatId,
                     seatInfo: b.seat
                         ? `R${b.seat.rowNum}C${b.seat.colNum}`
@@ -2708,9 +3096,19 @@ router.get('/violation/list', authMiddleware, async (ctx) => {
                     floorId: b.seat?.floorId,
                     date: b.date,
                     timeSlot: b.timeSlot,
+                    type: 'Violation',
+                    description: b.seat
+                        ? `R${b.seat.rowNum}C${b.seat.colNum}`
+                        : '',
+                    points: VIOLATION_DEDUCT_POINTS,
                     status: 'violated',
                     createdAt: b.created_at,
                     updatedAt: b.updated_at,
+                    updatedBy: (b as any).updatedBy,
+                    updatedByName: getDisplayName(
+                        (b as any).updatedBy,
+                        userMap
+                    ),
                 };
             })
         );
@@ -2735,7 +3133,7 @@ router.delete('/violation/:id', authMiddleware, async (ctx) => {
         const bookingId = parseInt(ctx.params.id);
         // Clearing a violation = changing status back to COMPLETED
         await Booking.update(
-            { status: BookingStatus.COMPLETED },
+            { status: BookingStatus.COMPLETED, ...buildUpdatedBy(ctx) },
             { where: { id: bookingId, status: BookingStatus.VIOLATED } }
         );
         ctx.body = { success: true, message: 'Violation cleared' };
@@ -2995,5 +3393,13 @@ router.get('/notification/unread-count', authMiddleware, async (ctx) => {
         ctx.body = { success: true, data: { count: 0 } };
     }
 });
+
+export const compatRouteDependencies = {
+    performBookingCheckin,
+    performBookingCheckout,
+    releaseBookingTimeSlot,
+    expireBookingIfNeeded,
+    markAllExpiredBookings,
+};
 
 export default router;

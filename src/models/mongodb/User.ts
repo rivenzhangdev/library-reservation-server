@@ -3,12 +3,14 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface IUser extends Document {
     username: string;
     password: string;
+    openid?: string;
     email?: string;
     phone?: string;
     studentId?: string;
     name?: string;
     avatar?: string;
     role: number;
+    isSuperAdmin?: boolean;
     creditScore: number;
     blacklisted: boolean;
     blacklistReason?: string;
@@ -33,7 +35,7 @@ export interface IUser extends Document {
             publicProfile: boolean;
         };
     };
-    favorites: mongoose.Types.ObjectId[];
+    favorites: number[];
     activityRegistrations?: Array<{
         activity: mongoose.Types.ObjectId;
         registeredAt: Date;
@@ -46,12 +48,14 @@ const userSchema = new Schema<IUser>(
     {
         username: { type: String, unique: true, required: true },
         password: { type: String, required: true },
+        openid: { type: String, unique: true, sparse: true },
         email: { type: String, unique: true, sparse: true },
         phone: { type: String, unique: true, sparse: true },
         studentId: { type: String, unique: true, sparse: true },
         name: String,
         avatar: String,
         role: { type: Number, enum: [0, 1], default: 0 },
+        isSuperAdmin: { type: Boolean, default: false },
         creditScore: { type: Number, default: 100 },
         blacklisted: { type: Boolean, default: false },
         blacklistReason: String,
@@ -76,7 +80,7 @@ const userSchema = new Schema<IUser>(
                 publicProfile: { type: Boolean, default: false },
             },
         },
-        favorites: [{ type: Schema.Types.ObjectId, ref: 'Seat' }],
+        favorites: [{ type: Number }],
         activityRegistrations: [
             {
                 activity: { type: Schema.Types.ObjectId, ref: 'Activity' },
@@ -93,6 +97,7 @@ const userSchema = new Schema<IUser>(
 
 // 创建索引（保留非重复索引）
 userSchema.index({ role: 1 });
+userSchema.index({ openid: 1 });
 userSchema.index({ 'activityRegistrations.activity': 1 });
 
 const User = mongoose.model<IUser>('User', userSchema);

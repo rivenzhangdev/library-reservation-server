@@ -275,7 +275,11 @@ node database/fix-mongodb-collections.js
             description: '活动列表、详情查看、报名与取消',
         },
         {
-            name: '💬 反馈系统 (Feedback)',
+            name: '� 管理兼容 (Admin Compatibility)',
+            description: '供管理后台调用的兼容接口',
+        },
+        {
+            name: '�💬 反馈系统 (Feedback)',
             description: '功能建议、问题上报、投诉建议',
         },
     ],
@@ -336,21 +340,44 @@ node database/fix-mongodb-collections.js
                         format: 'objectId',
                         description: '用户 ID',
                     },
-                    nickName: { type: 'string', description: '用户昵称' },
-                    avatarUrl: {
+                    username: {
+                        type: 'string',
+                        description: '用户名',
+                    },
+                    name: {
+                        type: 'string',
+                        nullable: true,
+                        description: '用户姓名',
+                    },
+                    avatar: {
                         type: 'string',
                         format: 'uri',
+                        nullable: true,
                         description: '头像 URL',
+                    },
+                    email: {
+                        type: 'string',
+                        nullable: true,
+                        description: '电子邮件',
+                    },
+                    phone: {
+                        type: 'string',
+                        nullable: true,
+                        description: '手机号',
                     },
                     studentId: {
                         type: 'string',
                         nullable: true,
-                        description: '学号（绑定后才有值）',
+                        description: '学号',
                     },
-                    realName: {
-                        type: 'string',
-                        nullable: true,
-                        description: '真实姓名',
+                    role: {
+                        type: 'integer',
+                        enum: [0, 1],
+                        description: '用户角色',
+                    },
+                    isSuperAdmin: {
+                        type: 'boolean',
+                        description: '是否超级管理员',
                     },
                     creditScore: {
                         type: 'integer',
@@ -358,20 +385,77 @@ node database/fix-mongodb-collections.js
                         maximum: 100,
                         description: '信用积分',
                     },
-                    role: {
-                        type: 'string',
-                        enum: ['user', 'admin'],
-                        description: '用户角色',
-                    },
-                    isBindStudentId: {
+                    blacklisted: {
                         type: 'boolean',
-                        description: '是否已绑定学号',
+                        description: '是否黑名单用户',
+                    },
+                    blacklistReason: {
+                        type: 'string',
+                        nullable: true,
+                        description: '黑名单原因',
                     },
                     favorites: {
                         type: 'array',
-                        items: { type: 'string' },
+                        items: { type: 'integer' },
                         description: '收藏座位 ID 列表',
                     },
+                    activityRegistrations: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                activity: {
+                                    type: 'string',
+                                    description: '活动 ID',
+                                },
+                                registeredAt: {
+                                    type: 'string',
+                                    format: 'date-time',
+                                    description: '报名时间',
+                                },
+                            },
+                        },
+                        description: '活动报名记录',
+                    },
+                    createdAt: {
+                        type: 'string',
+                        format: 'date-time',
+                        description: '创建时间',
+                    },
+                    updatedAt: {
+                        type: 'string',
+                        format: 'date-time',
+                        description: '更新时间',
+                    },
+                },
+            },
+
+            ViolationRecord: {
+                type: 'object',
+                properties: {
+                    id: { type: 'string' },
+                    bookingId: { type: 'integer' },
+                    userId: { type: 'string' },
+                    userName: { type: 'string' },
+                    userAvatar: {
+                        type: 'string',
+                        format: 'uri',
+                        nullable: true,
+                    },
+                    studentId: { type: 'string', nullable: true },
+                    seatId: { type: 'integer' },
+                    seatInfo: { type: 'string' },
+                    floorId: { type: 'integer', nullable: true },
+                    date: { type: 'string', format: 'date' },
+                    timeSlot: { type: 'integer' },
+                    type: { type: 'string' },
+                    description: { type: 'string' },
+                    points: { type: 'number' },
+                    status: { type: 'string' },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' },
+                    updatedBy: { type: 'string' },
+                    updatedByName: { type: 'string' },
                 },
             },
 
@@ -1925,6 +2009,237 @@ const allPaths = {
                         },
                     },
                 },
+            },
+        },
+    },
+    '/api/activity/list': {
+        get: {
+            tags: ['🔧 管理兼容 (Admin Compatibility)'],
+            summary: '获取活动列表（管理后台兼容）',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'q',
+                    in: 'query',
+                    schema: { type: 'string' },
+                    description: '关键词搜索标题/描述/地点',
+                },
+                {
+                    name: 'title',
+                    in: 'query',
+                    schema: { type: 'string' },
+                    description: '活动标题筛选',
+                },
+                {
+                    name: 'floorId',
+                    in: 'query',
+                    schema: { type: 'string' },
+                    description: '楼层 ID 筛选',
+                },
+                {
+                    name: 'status',
+                    in: 'query',
+                    schema: { type: 'integer', enum: [0, 1, 2] },
+                    description: '活动状态筛选',
+                },
+                {
+                    name: 'startTime',
+                    in: 'query',
+                    schema: { type: 'string' },
+                    description: '开始时间范围',
+                },
+                {
+                    name: 'page',
+                    in: 'query',
+                    schema: { type: 'integer', default: 1 },
+                    description: '页码',
+                },
+                {
+                    name: 'limit',
+                    in: 'query',
+                    schema: { type: 'integer', default: 20 },
+                    description: '每页数量',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            list: {
+                                                type: 'array',
+                                                items: {
+                                                    type: 'object',
+                                                    properties: {
+                                                        id: { type: 'string' },
+                                                        title: {
+                                                            type: 'string',
+                                                        },
+                                                        description: {
+                                                            type: 'string',
+                                                        },
+                                                        coverImage: {
+                                                            type: 'string',
+                                                            format: 'uri',
+                                                        },
+                                                        startTime: {
+                                                            type: 'string',
+                                                            format: 'date-time',
+                                                        },
+                                                        endTime: {
+                                                            type: 'string',
+                                                            format: 'date-time',
+                                                        },
+                                                        location: {
+                                                            type: 'string',
+                                                        },
+                                                        floorId: {
+                                                            type: 'string',
+                                                        },
+                                                        floorName: {
+                                                            type: 'string',
+                                                        },
+                                                        status: {
+                                                            type: 'integer',
+                                                            enum: [0, 1, 2],
+                                                        },
+                                                        participants: {
+                                                            type: 'integer',
+                                                        },
+                                                        maxParticipants: {
+                                                            type: 'integer',
+                                                        },
+                                                        createdBy: {
+                                                            type: 'string',
+                                                        },
+                                                        createdByName: {
+                                                            type: 'string',
+                                                        },
+                                                        updatedBy: {
+                                                            type: 'string',
+                                                        },
+                                                        updatedByName: {
+                                                            type: 'string',
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                            total: { type: 'integer' },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    '/api/violation/list': {
+        get: {
+            tags: ['🔧 管理兼容 (Admin Compatibility)'],
+            summary: '获取违规记录列表',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'userName',
+                    in: 'query',
+                    schema: { type: 'string' },
+                    description: '按用户名过滤',
+                },
+                {
+                    name: 'studentId',
+                    in: 'query',
+                    schema: { type: 'string' },
+                    description: '按学号过滤',
+                },
+                {
+                    name: 'type',
+                    in: 'query',
+                    schema: { type: 'integer' },
+                    description: '违规类型过滤',
+                },
+                {
+                    name: 'date',
+                    in: 'query',
+                    schema: { type: 'string' },
+                    description: '违规日期过滤',
+                },
+                {
+                    name: 'q',
+                    in: 'query',
+                    schema: { type: 'string' },
+                    description: '关键字搜索用户名/姓名/学号',
+                },
+                {
+                    name: 'page',
+                    in: 'query',
+                    schema: { type: 'integer', default: 1 },
+                    description: '页码',
+                },
+                {
+                    name: 'limit',
+                    in: 'query',
+                    schema: { type: 'integer', default: 20 },
+                    description: '每页数量',
+                },
+            ],
+            responses: {
+                200: {
+                    description: '获取成功',
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                properties: {
+                                    success: { type: 'boolean', example: true },
+                                    data: {
+                                        type: 'object',
+                                        properties: {
+                                            list: {
+                                                type: 'array',
+                                                items: {
+                                                    $ref: '#/components/schemas/ViolationRecord',
+                                                },
+                                            },
+                                            total: { type: 'integer' },
+                                            page: { type: 'integer' },
+                                            limit: { type: 'integer' },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                401: { description: '未授权' },
+            },
+        },
+    },
+    '/api/violation/{id}': {
+        delete: {
+            tags: ['🔧 管理兼容 (Admin Compatibility)'],
+            summary: '清除违规记录',
+            security: [{ bearerAuth: [] }],
+            parameters: [
+                {
+                    name: 'id',
+                    in: 'path',
+                    required: true,
+                    schema: { type: 'integer' },
+                    description: '违规记录 ID（booking ID）',
+                },
+            ],
+            responses: {
+                200: { description: '清除成功' },
+                404: { description: '记录不存在' },
             },
         },
     },

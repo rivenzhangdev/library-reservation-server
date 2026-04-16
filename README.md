@@ -44,6 +44,8 @@ cp .env.example .env
 # 微信配置 - 需在微信公众平台注册获取
 WX_APP_ID=你的小程序 AppID
 WX_APP_SECRET=你的小程序 AppSecret
+WECHAT_TEMPLATE_BOOKING_SUCCESS=你环境下的打卡提醒模板 ID
+WECHAT_TEMPLATE_BOOKING_REMINDER=你环境下的签到提醒模板 ID
 
 # JWT 密钥 - 生产环境务必使用强随机字符串
 JWT_SECRET=你的 JWT 密钥
@@ -54,6 +56,8 @@ DB_MYSQL_PASSWORD=你的 MySQL 密码
 # MongoDB 配置
 DB_MONGODB_URI=mongodb://localhost:27017/library_booking_dev
 ```
+
+> 真实的 `WECHAT_TEMPLATE_BOOKING_SUCCESS` 和 `WECHAT_TEMPLATE_BOOKING_REMINDER` 应当写入每个环境对应的配置文件，例如 `.env.development`, `.env.test`, `.env.uat`, `.env.production`。`
 
 3. **获取微信 AppID 和 Secret:**
     - 访问 [微信公众平台](https://mp.weixin.qq.com/)

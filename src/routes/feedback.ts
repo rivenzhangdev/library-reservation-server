@@ -8,7 +8,10 @@ import { CustomError } from '../middleware/error';
 import { Feedback, User } from '../models/mongodb';
 import { Roles } from '../constants/roles';
 import { Upload } from '../models/mongodb';
+import { normalizeNumericEnum } from '../utils/enum-normalizers';
+import { buildUpdatedBy } from '../utils/audit';
 import { ErrorCodes } from '../utils/error-codes';
+import { getUserDisplayName } from '../utils/user-display';
 
 const router = new Router({ prefix: '/api/feedback' });
 
@@ -192,7 +195,7 @@ router.get('/my', authMiddleware, async (ctx) => {
             .skip((page - 1) * limit)
             .limit(limit)
             .select(
-                'id typeId urgencyId title description images status reply replyAt createdAt'
+                'id typeId urgencyId title description images status reply replyAt createdAt comments'
             );
 
         ctx.body = {
@@ -208,6 +211,7 @@ router.get('/my', authMiddleware, async (ctx) => {
                     status: fb.status, // 数字类型
                     reply: fb.reply,
                     replyAt: fb.replyAt,
+                    commentsCount: (fb.comments || []).length,
                     createdAt: fb.createdAt,
                 })),
                 total,
@@ -244,7 +248,7 @@ router.get('/list', authMiddleware, adminMiddleware, async (ctx) => {
             .populate('userId', 'name avatar studentId username')
             .populate('updatedBy', 'name username')
             .select(
-                'id userId typeId typeName urgencyId urgencyName title description images status reply replyAt createdAt updatedBy'
+                'id userId typeId typeName urgencyId urgencyName title description images status reply replyAt createdAt updatedBy comments'
             );
 
         ctx.body = {
@@ -263,12 +267,10 @@ router.get('/list', authMiddleware, adminMiddleware, async (ctx) => {
                     status: fb.status,
                     reply: fb.reply,
                     replyAt: fb.replyAt,
+                    commentsCount: (fb.comments || []).length,
                     createdAt: fb.createdAt,
                     updatedBy: fb.updatedBy?._id || fb.updatedBy,
-                    updatedByName:
-                        fb.updatedBy?.username ||
-                        fb.updatedBy?.name ||
-                        undefined,
+                    updatedByName: getUserDisplayName(fb.updatedBy as any),
                 })),
                 total,
                 page,
@@ -350,8 +352,7 @@ router.get('/:id', authMiddleware, async (ctx) => {
                 const updatedByUser = await User.findById(feedback.updatedBy)
                     .select('name username')
                     .lean();
-                updatedByName =
-                    updatedByUser?.username || updatedByUser?.name || undefined;
+                updatedByName = getUserDisplayName(updatedByUser as any);
                 updatedByValue = updatedByUser?._id || feedback.updatedBy;
             } catch (error) {
                 // ignore audit lookup errors
@@ -363,6 +364,7 @@ router.get('/:id', authMiddleware, async (ctx) => {
             data: {
                 id: feedback._id,
                 userId: feedback.userId,
+                userName: getUserDisplayName(feedback.userId as any),
                 typeId: feedback.typeId, // 数字类型
                 urgencyId: feedback.urgencyId, // 数字类型
                 title: feedback.title,
@@ -411,7 +413,12 @@ router.put('/:id', authMiddleware, adminMiddleware, async (ctx) => {
                 ErrorCodes.FEEDBACK_NOT_FOUND
             );
 
-        if (status) feedback.status = status;
+        const normalizedStatus = normalizeNumericEnum(status);
+        if (normalizedStatus !== undefined) {
+            feedback.status = normalizedStatus;
+        } else if (reply && feedback.status === FeedbackStatus.PENDING) {
+            feedback.status = FeedbackStatus.PROCESSING;
+        }
         if (reply) {
             feedback.reply = reply;
             feedback.repliedBy = user._id;
@@ -420,12 +427,7 @@ router.put('/:id', authMiddleware, adminMiddleware, async (ctx) => {
             feedback.processedAt = new Date();
         }
 
-        // mark updatedBy for audit
-        try {
-            if (user && user._id) feedback.updatedBy = user._id;
-        } catch (e) {
-            // ignore
-        }
+        Object.assign(feedback, buildUpdatedBy(ctx));
 
         await feedback.save();
 
@@ -465,19 +467,17 @@ router.put('/status/:id', authMiddleware, adminMiddleware, async (ctx) => {
                 ErrorCodes.FEEDBACK_NOT_FOUND
             );
 
-        if (status) feedback.status = status;
+        const normalizedStatus = normalizeNumericEnum(status);
+        if (normalizedStatus !== undefined) {
+            feedback.status = normalizedStatus;
+        }
         if (reason) {
             feedback.processedReason = reason;
             feedback.processedBy = user._id;
             feedback.processedAt = new Date();
         }
 
-        // mark updatedBy
-        try {
-            if (user && user._id) feedback.updatedBy = user._id;
-        } catch (e) {
-            // Ignore errors when setting updatedBy
-        }
+        Object.assign(feedback, buildUpdatedBy(ctx));
 
         await feedback.save();
 
@@ -520,7 +520,7 @@ router.post('/comment/:id', authMiddleware, async (ctx) => {
                 ErrorCodes.FEEDBACK_NOT_FOUND
             );
 
-        const opName = operator || user?.username || user?.name || 'system';
+        const opName = operator || user?.name || 'system';
         const isOfficial = user?.role === Roles.ADMIN;
 
         const comment = {
@@ -531,13 +531,11 @@ router.post('/comment/:id', authMiddleware, async (ctx) => {
         };
         feedback.comments = feedback.comments || [];
         feedback.comments.push(comment as any);
-
-        // mark updatedBy when a user/admin comments
-        try {
-            if (user && user._id) feedback.updatedBy = user._id;
-        } catch (e) {
-            // Ignore errors when setting updatedBy
+        if (isOfficial && feedback.status === FeedbackStatus.PENDING) {
+            feedback.status = FeedbackStatus.PROCESSING;
         }
+
+        Object.assign(feedback, buildUpdatedBy(ctx));
 
         await feedback.save();
 
@@ -582,13 +580,7 @@ router.delete('/image/:id', authMiddleware, adminMiddleware, async (ctx) => {
             );
 
         feedback.images = (feedback.images || []).filter((u) => u !== url);
-        // set updatedBy to the admin performing deletion
-        try {
-            const user = await User.findById(userId);
-            if (user && user._id) feedback.updatedBy = user._id;
-        } catch (e) {
-            // Ignore errors when setting updatedBy
-        }
+        Object.assign(feedback, buildUpdatedBy(ctx));
         await feedback.save();
 
         // 不要立即删除文件或元数据：仅解除该 Upload 与反馈的关联（清空 refType/refId），
@@ -660,7 +652,7 @@ router.get('/export', authMiddleware, adminMiddleware, async (ctx) => {
             fb.urgencyName || fb.urgencyId || '',
             fb.status,
             fb.userId?._id?.toString() || '',
-            fb.userId?.username || fb.userId?.name || '',
+            getUserDisplayName(fb.userId as any) || '',
             fb.userId?.studentId || '',
             fb.createdAt ? fb.createdAt.toISOString() : '',
         ]);

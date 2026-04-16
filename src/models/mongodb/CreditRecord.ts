@@ -2,6 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface ICreditRecord extends Document {
     userId: mongoose.Types.ObjectId;
+    bookingId?: number;
     updatedBy?: mongoose.Types.ObjectId;
     type: number; // 0: add, 1: deduct
     points: number;
@@ -12,6 +13,7 @@ export interface ICreditRecord extends Document {
 const creditRecordSchema = new Schema<ICreditRecord>(
     {
         userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+        bookingId: { type: Number, index: true },
         type: { type: Number, enum: [0, 1], required: true },
         points: { type: Number, required: true },
         date: { type: Date, default: Date.now },

@@ -10,7 +10,15 @@ export interface INotification extends Document {
     time: Date;
     isRead: boolean;
     relatedId?: string;
+    targetType?: 'user' | 'role' | 'floor' | 'all';
+    targetRole?: number;
+    floorId?: string;
     data?: any;
+    templateType?: string;
+    templateId?: string;
+    templatePage?: string;
+    templateData?: any;
+    templatePayload?: any;
 }
 
 const notificationSchema = new Schema<INotification>(
@@ -28,7 +36,19 @@ const notificationSchema = new Schema<INotification>(
         relatedId: String,
         updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+        targetType: {
+            type: String,
+            enum: ['user', 'role', 'floor', 'all'],
+            default: 'user',
+        },
+        targetRole: { type: Number, enum: [0, 1] },
+        floorId: { type: String },
         data: Schema.Types.Mixed,
+        templateType: { type: String },
+        templateId: { type: String },
+        templatePage: { type: String },
+        templateData: Schema.Types.Mixed,
+        templatePayload: Schema.Types.Mixed,
     },
     {
         timestamps: true,

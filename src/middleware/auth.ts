@@ -1,9 +1,10 @@
 import { Context, Next } from 'koa';
-import jwt from 'jsonwebtoken';
-import dotenv from 'dotenv';
+import * as jwt from 'jsonwebtoken';
+import * as dotenv from 'dotenv';
 import { ErrorCodes } from '../utils/error-codes';
 import { User } from '../models/mongodb';
 import { normalizeUploadUrl } from '../utils/upload';
+import { CustomError } from '../middleware/error';
 
 dotenv.config();
 
@@ -89,17 +90,7 @@ export async function authMiddleware(ctx: Context, next: Next) {
         if (!decoded) throw new Error('invalid token');
 
         // Normalize role to numeric value so downstream checks work consistently
-        const normalizeRole = (r: any) => {
-            try {
-                if (r === undefined || r === null) return 0;
-                if (typeof r === 'number') return r;
-                return 0;
-            } catch (e) {
-                return 0;
-            }
-        };
-
-        // normalize id and role for downstream usage
+        // normalize id for downstream usage
         const d: any = decoded || {};
         const extractedId = d.id ?? d._id ?? d.sub ?? undefined;
         const normalizedId =
@@ -108,7 +99,9 @@ export async function authMiddleware(ctx: Context, next: Next) {
                 : extractedId;
         const latestUser = normalizedId
             ? await User.findById(normalizedId)
-                  .select('_id username name role avatar blacklisted')
+                  .select(
+                      '_id username name role avatar blacklisted blacklistReason'
+                  )
                   .lean()
             : null;
 
@@ -128,13 +121,14 @@ export async function authMiddleware(ctx: Context, next: Next) {
             ...(d as any),
             ...(latestUser || {}),
             id: latestUser?._id ? String(latestUser._id) : normalizedId,
-            role: normalizeRole(latestUser?.role ?? d.role),
+            role: latestUser?.role ?? d.role,
             username: latestUser?.username ?? d.username,
             name: latestUser?.username ?? latestUser?.name ?? d.name,
             avatar: normalizeUploadUrl(
                 String(latestUser?.avatar || d.avatar || '')
             ),
             blacklisted: !!latestUser?.blacklisted,
+            blacklistReason: latestUser?.blacklistReason ?? d.blacklistReason,
         };
 
         if (process.env.NODE_ENV !== 'production') {
@@ -191,16 +185,6 @@ export async function optionalAuthMiddleware(ctx: Context, next: Next) {
     if (token) {
         try {
             const decoded = jwt.verify(token, JWT_SECRET) as any;
-            // normalize role for optional auth as well
-            const normalizeRole = (r: any) => {
-                try {
-                    if (r === undefined || r === null) return 0;
-                    if (typeof r === 'number') return r;
-                    return 0;
-                } catch (e) {
-                    return 0;
-                }
-            };
             const d: any = decoded || {};
             const extractedId = d.id ?? d._id ?? d.sub ?? undefined;
             const normalizedId =
@@ -209,18 +193,22 @@ export async function optionalAuthMiddleware(ctx: Context, next: Next) {
                     : extractedId;
             const latestUser = normalizedId
                 ? await User.findById(normalizedId)
-                      .select('_id username name role avatar blacklisted')
+                      .select(
+                          '_id username name role avatar blacklisted blacklistReason'
+                      )
                       .lean()
                 : null;
             (ctx as any).state.user = {
                 ...(d || {}),
                 ...(latestUser || {}),
                 id: latestUser?._id ? String(latestUser._id) : normalizedId,
-                role: normalizeRole(latestUser?.role ?? d.role),
+                role: latestUser?.role ?? d.role,
                 username: latestUser?.username ?? d.username,
                 name: latestUser?.username ?? latestUser?.name ?? d.name,
                 avatar: latestUser?.avatar ?? d.avatar,
                 blacklisted: !!latestUser?.blacklisted,
+                blacklistReason:
+                    latestUser?.blacklistReason ?? d.blacklistReason,
             };
         } catch (_error) {
             // Token 无效但继续执行，因为这是可选认证
@@ -232,6 +220,16 @@ export async function optionalAuthMiddleware(ctx: Context, next: Next) {
 
 // 管理员权限中间件
 import { Roles } from '../constants/roles';
+
+export function ensureNotBlacklisted(ctx: Context) {
+    const user = (ctx as any).state.user;
+    if (user?.blacklisted) {
+        throw new CustomError(
+            'Your account has been blacklisted',
+            ErrorCodes.USER_BLACKLISTED
+        );
+    }
+}
 
 export async function adminMiddleware(ctx: Context, next: Next) {
     const user = (ctx as any).state.user;

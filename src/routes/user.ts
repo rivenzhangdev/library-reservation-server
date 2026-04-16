@@ -4,10 +4,21 @@ import { CustomError } from '../middleware/error';
 import { CreditRecord, Feedback, User } from '../models/mongodb';
 import { Floor, Seat } from '../models/mysql';
 import { normalizeUploadUrl, saveBase64Image } from '../utils/upload';
+import { getUserDisplayName } from '../utils/user-display';
 import { ErrorCodes } from '../utils/error-codes';
 import { normalizeSeatStatus } from '../utils/seat-status';
+import { Roles } from '../constants/roles';
 
 const router = new Router({ prefix: '/api/user' });
+
+function assertNotReadOnlySuperAdmin(ctx: any) {
+    if ((ctx as any).state.user?.isSuperAdmin) {
+        throw new CustomError(
+            'Super admin account is read-only',
+            ErrorCodes.FORBIDDEN
+        );
+    }
+}
 
 // 信用等级枚举 (数字类型)
 enum CreditLevel {
@@ -32,9 +43,12 @@ router.get('/profile', authMiddleware, async (ctx) => {
         }
 
         const normalizedUser = user.toObject();
+        delete (normalizedUser as any).isSuperAdmin;
         normalizedUser.avatar = normalizeUploadUrl(
-            String(normalizedUser.avatar || '')
+            String(normalizedUser.avatar || ''),
+            ctx.origin
         );
+        normalizedUser.avatarUrl = normalizedUser.avatar;
 
         ctx.body = {
             success: true,
@@ -55,11 +69,54 @@ router.get('/profile', authMiddleware, async (ctx) => {
  */
 router.put('/profile', authMiddleware, async (ctx) => {
     try {
+        assertNotReadOnlySuperAdmin(ctx);
         const userId = (ctx as any).state.user.id;
-        const { name, avatar } = ctx.request.body as any;
+        const { name, avatar, username, phone } = ctx.request.body as any;
 
         const updateData: any = {};
         if (name !== undefined) updateData.name = name;
+        if (username !== undefined) {
+            const normalizedUsername = String(username).trim();
+            if (!normalizedUsername) {
+                throw new CustomError(
+                    'Username cannot be empty',
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+            const existingUser = await User.findOne({
+                username: normalizedUsername,
+                _id: { $ne: userId },
+            });
+            if (existingUser) {
+                throw new CustomError(
+                    'Username already exists',
+                    ErrorCodes.USERNAME_EXISTS ?? ErrorCodes.INVALID_PARAMS
+                );
+            }
+            updateData.username = normalizedUsername;
+        }
+        if (phone !== undefined) {
+            const normalizedPhone = String(phone).trim();
+            if (normalizedPhone && !/^1\d{10}$/.test(normalizedPhone)) {
+                throw new CustomError(
+                    'Invalid phone number',
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+            if (normalizedPhone) {
+                const existingPhoneUser = await User.findOne({
+                    phone: normalizedPhone,
+                    _id: { $ne: userId },
+                });
+                if (existingPhoneUser) {
+                    throw new CustomError(
+                        'Phone number already exists',
+                        ErrorCodes.INVALID_PARAMS
+                    );
+                }
+            }
+            updateData.phone = normalizedPhone;
+        }
         if (avatar !== undefined) {
             // if avatar is base64 data URL, save to uploads and set url
             if (typeof avatar === 'string' && avatar.startsWith('data:')) {
@@ -129,6 +186,7 @@ router.get('/settings', authMiddleware, async (ctx) => {
  */
 router.put('/settings', authMiddleware, async (ctx) => {
     try {
+        assertNotReadOnlySuperAdmin(ctx);
         const userId = (ctx as any).state.user.id;
         const settings = ctx.request.body as any;
 
@@ -164,8 +222,13 @@ router.put('/settings', authMiddleware, async (ctx) => {
  */
 router.post('/favorite/:seatId', authMiddleware, async (ctx) => {
     try {
+        assertNotReadOnlySuperAdmin(ctx);
         const userId = (ctx as any).state.user.id;
-        const seatId = ctx.params.seatId;
+        const seatId = Number.parseInt(ctx.params.seatId, 10);
+
+        if (Number.isNaN(seatId)) {
+            throw new CustomError('Invalid seat ID', ErrorCodes.INVALID_PARAMS);
+        }
 
         const user = await User.findById(userId);
 
@@ -174,7 +237,7 @@ router.post('/favorite/:seatId', authMiddleware, async (ctx) => {
         }
 
         const favoriteIndex = user.favorites.findIndex(
-            (id) => id.toString() === seatId
+            (id) => Number(id) === seatId
         );
 
         if (favoriteIndex > -1) {
@@ -215,7 +278,9 @@ router.get('/favorites', authMiddleware, async (ctx) => {
             throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
         }
 
-        const seatIds = user.favorites.map((id) => parseInt(id.toString()));
+        const seatIds = user.favorites
+            .map((id) => Number(id))
+            .filter((id) => !Number.isNaN(id));
         const seats =
             seatIds.length > 0
                 ? await Seat.findAll({
@@ -315,23 +380,39 @@ router.get('/credit/records', authMiddleware, async (ctx) => {
         const page = parseInt((ctx.query.page as string) || '1');
         const limit = parseInt((ctx.query.limit as string) || '20');
 
-        const total = await CreditRecord.countDocuments({ userId });
+        const isAdmin = (ctx as any).state.user?.role === Roles.ADMIN;
+        const query: any = isAdmin ? {} : { userId };
 
-        const records = await CreditRecord.find({ userId })
+        const total = await CreditRecord.countDocuments(query);
+
+        const records = await CreditRecord.find(query)
             .sort({ date: -1 })
             .skip((page - 1) * limit)
-            .limit(limit);
+            .limit(limit)
+            .populate('userId', 'username name studentId avatar')
+            .populate('updatedBy', 'username name');
+
+        const mappedRecords = records.map((record) => ({
+            id: record._id,
+            type: record.type,
+            points: record.points,
+            date: record.date,
+            reason: record.reason,
+            userId: record.userId?._id || undefined,
+            userName:
+                getUserDisplayName(record.userId as any) ||
+                record.userId?.studentId ||
+                '',
+            userAvatar: record.userId?.avatar || '',
+            updatedByName:
+                getUserDisplayName(record.updatedBy as any) ||
+                (record.updatedBy?._id ? String(record.updatedBy._id) : ''),
+        }));
 
         ctx.body = {
             success: true,
             data: {
-                records: records.map((record) => ({
-                    id: record._id,
-                    type: record.type,
-                    points: record.points,
-                    date: record.date,
-                    reason: record.reason,
-                })),
+                list: mappedRecords,
                 total,
                 page,
                 limit,

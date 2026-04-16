@@ -1,22 +1,22 @@
 import Router from 'koa-router';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, ensureNotBlacklisted } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
-import { Activity, User } from '../models/mongodb';
+import { Activity, CreditRecord, User } from '../models/mongodb';
 import { ActivityStatus } from '../models/mysql/types';
+import {
+    getUserDisplayName,
+    getUserDisplayNameFromMap,
+} from '../utils/user-display';
 import { ErrorCodes } from '../utils/error-codes';
 
 const router = new Router({ prefix: '/api/activity' });
 
-function getUserDisplayName(value: any, userMap: Record<string, any>) {
+function resolveUserDisplayName(value: any, userMap: Record<string, any>) {
     if (!value) return undefined;
     if (typeof value === 'object') {
-        return value.username || value.name;
+        return getUserDisplayName(value as any);
     }
-    return (
-        userMap[String(value)]?.username ||
-        userMap[String(value)]?.name ||
-        undefined
-    );
+    return getUserDisplayNameFromMap(value, userMap);
 }
 
 /**
@@ -25,31 +25,16 @@ function getUserDisplayName(value: any, userMap: Record<string, any>) {
  */
 router.get('/', async (ctx) => {
     try {
-        // Use non-populated fetch + manual lookup to maximize compatibility with legacy data
-        const activities = await Activity.find().lean();
-
-        const userIds = Array.from(
-            new Set(
-                activities
-                    .flatMap((a: any) => [a.createdBy, a.updatedBy])
-                    .filter(Boolean)
-                    .map((x: any) => String(x))
-            )
-        );
-
-        const userMap: Record<string, any> = {};
-        if (userIds.length) {
-            const users = await User.find({ _id: { $in: userIds } })
-                .select('name username')
-                .lean();
-            users.forEach((u: any) => (userMap[String(u._id)] = u));
-        }
+        const activities = await Activity.find()
+            .populate('createdBy', 'name username')
+            .populate('updatedBy', 'name username')
+            .lean();
 
         const mapped = (activities || []).map((a: any) => ({
             ...a,
-            createdByName: getUserDisplayName(a.createdBy, userMap),
+            createdByName: resolveUserDisplayName(a.createdBy, {}),
             updatedBy: a.updatedBy,
-            updatedByName: getUserDisplayName(a.updatedBy, userMap),
+            updatedByName: resolveUserDisplayName(a.updatedBy, {}),
         }));
 
         ctx.body = {
@@ -94,9 +79,9 @@ router.get('/list', async (ctx) => {
 
         const mapped = (activities || []).map((a: any) => ({
             ...a,
-            createdByName: getUserDisplayName(a.createdBy, userMap),
+            createdByName: resolveUserDisplayName(a.createdBy, userMap),
             updatedBy: a.updatedBy,
-            updatedByName: getUserDisplayName(a.updatedBy, userMap),
+            updatedByName: resolveUserDisplayName(a.updatedBy, userMap),
         }));
 
         ctx.body = {
@@ -138,24 +123,21 @@ router.get('/:id', async (ctx) => {
                     .map((x: any) => String(x))
             )
         );
-        const users = lookupIds.length
-            ? await User.find({ _id: { $in: lookupIds } })
-                  .select('name username')
-                  .lean()
-            : [];
-        const userMap: Record<string, any> = {};
-        users.forEach((u: any) => (userMap[String(u._id)] = u));
+        const populatedActivity = await Activity.findById(activityId)
+            .populate('createdBy', 'name username')
+            .populate('updatedBy', 'name username')
+            .lean();
 
         const mapped = {
             ...activity,
-            createdByName: getUserDisplayName(
-                (activity as any).createdBy,
-                userMap
+            createdByName: resolveUserDisplayName(
+                populatedActivity?.createdBy,
+                {}
             ),
             updatedBy: activity.updatedBy,
-            updatedByName: getUserDisplayName(
-                (activity as any).updatedBy,
-                userMap
+            updatedByName: resolveUserDisplayName(
+                populatedActivity?.updatedBy,
+                {}
             ),
         };
 
@@ -179,6 +161,7 @@ router.get('/:id', async (ctx) => {
  */
 router.post('/join/:id', authMiddleware, async (ctx) => {
     try {
+        ensureNotBlacklisted(ctx);
         const activityId = ctx.params.id;
         const userId = (ctx as any).state.user.id;
 
@@ -270,6 +253,164 @@ router.post('/cancel/:id', authMiddleware, async (ctx) => {
         throw new CustomError(
             'Failed to cancel registration',
             ErrorCodes.CANCEL_JOIN_ERROR
+        );
+    }
+});
+
+/**
+ * @route POST /api/activity/checkin/:id
+ * @desc Activity sign-in interface
+ */
+router.post('/checkin/:id', authMiddleware, async (ctx) => {
+    try {
+        ensureNotBlacklisted(ctx);
+        const activityId = ctx.params.id;
+        const userId = (ctx as any).state.user.id;
+
+        const activity = await Activity.findById(activityId);
+        if (!activity) {
+            throw new CustomError(
+                'Activity not found',
+                ErrorCodes.ACTIVITY_NOT_FOUND
+            );
+        }
+
+        if (activity.status !== ActivityStatus.ONGOING) {
+            const errorCode =
+                activity.status === ActivityStatus.UPCOMING
+                    ? ErrorCodes.ACTIVITY_NOT_STARTED
+                    : ErrorCodes.ACTIVITY_ENDED;
+            throw new CustomError(
+                'Activity is not in sign-in state',
+                errorCode
+            );
+        }
+
+        const hasJoined = Array.isArray(activity.participants)
+            ? activity.participants.some(
+                  (participant: any) => String(participant) === String(userId)
+              )
+            : false;
+        if (!hasJoined) {
+            throw new CustomError(
+                'You have not joined this activity',
+                ErrorCodes.NOT_JOINED
+            );
+        }
+
+        const checkedInList = Array.isArray(activity.checkedIn)
+            ? activity.checkedIn
+            : [];
+        const alreadyCheckedIn = checkedInList.some(
+            (participant: any) => String(participant) === String(userId)
+        );
+        if (alreadyCheckedIn) {
+            ctx.body = {
+                success: true,
+                message: 'Already signed in',
+            };
+            return;
+        }
+
+        activity.checkedIn = checkedInList.concat(userId);
+        await activity.save();
+
+        await CreditRecord.create({
+            userId,
+            type: 0,
+            points: 0,
+            reason: 'Activity check-in',
+            updatedBy: userId,
+        });
+
+        ctx.body = {
+            success: true,
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to sign in to activity',
+            ErrorCodes.ACTIVITY_CHECKIN_ERROR
+        );
+    }
+});
+
+/**
+ * @route POST /api/activity/checkout/:id
+ * @desc Activity sign-out interface
+ */
+router.post('/checkout/:id', authMiddleware, async (ctx) => {
+    try {
+        ensureNotBlacklisted(ctx);
+        const activityId = ctx.params.id;
+        const userId = (ctx as any).state.user.id;
+
+        const activity = await Activity.findById(activityId);
+        if (!activity) {
+            throw new CustomError(
+                'Activity not found',
+                ErrorCodes.ACTIVITY_NOT_FOUND
+            );
+        }
+
+        if (activity.status === ActivityStatus.UPCOMING) {
+            throw new CustomError(
+                'Activity is not started yet',
+                ErrorCodes.ACTIVITY_NOT_STARTED
+            );
+        }
+
+        const hasJoined = Array.isArray(activity.participants)
+            ? activity.participants.some(
+                  (participant: any) => String(participant) === String(userId)
+              )
+            : false;
+        if (!hasJoined) {
+            throw new CustomError(
+                'You have not joined this activity',
+                ErrorCodes.NOT_JOINED
+            );
+        }
+
+        const checkedInList = Array.isArray(activity.checkedIn)
+            ? activity.checkedIn
+            : [];
+        const alreadyCheckedIn = checkedInList.some(
+            (participant: any) => String(participant) === String(userId)
+        );
+        if (!alreadyCheckedIn) {
+            throw new CustomError(
+                'You have not signed in yet',
+                ErrorCodes.ACTIVITY_NOT_SIGNED_IN
+            );
+        }
+
+        const checkedOutList = Array.isArray(activity.checkedOut)
+            ? activity.checkedOut
+            : [];
+        const alreadyCheckedOut = checkedOutList.some(
+            (participant: any) => String(participant) === String(userId)
+        );
+        if (alreadyCheckedOut) {
+            ctx.body = {
+                success: true,
+                message: 'Already signed out',
+            };
+            return;
+        }
+
+        activity.checkedOut = checkedOutList.concat(userId);
+        activity.checkedOutAt = new Date();
+        await activity.save();
+
+        ctx.body = {
+            success: true,
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to sign out of activity',
+            ErrorCodes.ACTIVITY_CHECKOUT_ERROR
         );
     }
 });

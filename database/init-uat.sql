@@ -75,5 +75,19 @@ CREATE TABLE IF NOT EXISTS time_slot_status (
 -- 添加唯一索引，确保同一座位在同一日期的同一时间段状态唯一
 CREATE UNIQUE INDEX idx_time_slot_status ON time_slot_status(seat_id, date, time_slot);
 
+-- 创建 time_slot_config 表 (时间段配置表)
+CREATE TABLE IF NOT EXISTS time_slot_config (
+  id INT PRIMARY KEY AUTO_INCREMENT COMMENT 'ID',
+  time_slot TINYINT NOT NULL COMMENT '时间段编号 (0:上午，1:下午，2:晚上)',
+  value VARCHAR(32) NOT NULL UNIQUE COMMENT '时间段标识',
+  label VARCHAR(32) NOT NULL COMMENT '时间段标签',
+  start_time VARCHAR(5) NOT NULL COMMENT '开始时间',
+  end_time VARCHAR(5) NOT NULL COMMENT '结束时间',
+  `order` INT NOT NULL DEFAULT 0 COMMENT '显示顺序',
+  enabled BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否启用',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='时间段配置表';
+
 -- ⚠️ 注意：UAT 环境不插入测试数据，保持数据库干净
 -- 所有数据应通过 API 接口或管理后台添加

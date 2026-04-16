@@ -14,6 +14,9 @@ export interface IActivity extends Document {
     awards: string;
     createdBy: mongoose.Types.ObjectId;
     updatedBy?: mongoose.Types.ObjectId;
+    checkedIn?: mongoose.Types.ObjectId[];
+    checkedOut?: mongoose.Types.ObjectId[];
+    checkedOutAt?: Date;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -32,6 +35,15 @@ const activitySchema = new Schema<IActivity>(
             default: 0,
         },
         participants: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+        checkedIn: {
+            type: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+            default: [],
+        },
+        checkedOut: {
+            type: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+            default: [],
+        },
+        checkedOutAt: Date,
         maxParticipants: { type: Number, default: 100 },
         rules: String,
         awards: String,
@@ -46,6 +58,8 @@ const activitySchema = new Schema<IActivity>(
 // 创建索引
 activitySchema.index({ status: 1, startTime: 1 });
 activitySchema.index({ participants: 1 });
+activitySchema.index({ checkedIn: 1 });
+activitySchema.index({ checkedOut: 1 });
 
 const Activity = mongoose.model<IActivity>('Activity', activitySchema);
 

@@ -1,7 +1,8 @@
 import Router from 'koa-router';
 import { Op } from 'sequelize';
 import { CustomError } from '../middleware/error';
-import { Floor, Seat, TimeSlotStatus } from '../models/mysql';
+import { optionalAuthMiddleware } from '../middleware/auth';
+import { Floor, Seat, TimeSlotStatus, Booking } from '../models/mysql';
 import { compareFloorName } from '../utils/floor-order';
 import { ErrorCodes } from '../utils/error-codes';
 import {
@@ -10,6 +11,11 @@ import {
     getSeatAvailabilityStatus,
     normalizeSeatStatus,
 } from '../utils/seat-status';
+import { BookingStatus, TimeSlotStatusValue } from '../models/mysql/types';
+import {
+    getTimeSlotConfigItems,
+    getTimeSlotConfigItem,
+} from '../utils/time-slot-config';
 
 const router = new Router({ prefix: '/api/seats' });
 
@@ -48,7 +54,7 @@ router.get('/floors', async (ctx) => {
  * @route GET /api/seats/floor/:floorId
  * @desc Get seats by floor interface
  */
-router.get('/floor/:floorId', async (ctx) => {
+router.get('/floor/:floorId', optionalAuthMiddleware, async (ctx) => {
     try {
         const floorId = ctx.params.floorId;
         const { date, timeSlot, filters } = ctx.query as any;
@@ -87,14 +93,37 @@ router.get('/floor/:floorId', async (ctx) => {
         // 如果有日期和时间段，查询座位状态
         let seatWithStatus: any[] = [];
         if (date && timeSlot) {
+            const currentUserId = (ctx as any).state.user?.id;
             for (const seat of seats) {
-                const status = await TimeSlotStatus.findOne({
+                const status = (await TimeSlotStatus.findOne({
                     where: {
                         seatId: seat.id,
                         date,
                         timeSlot,
                     },
-                });
+                    include: [
+                        {
+                            model: Booking,
+                            as: 'booking',
+                            attributes: [
+                                'userId',
+                                'startTime',
+                                'endTime',
+                                'timeSlot',
+                            ],
+                        },
+                    ],
+                })) as any;
+
+                const availability = getSeatAvailabilityStatus(
+                    seat.status,
+                    status?.status
+                );
+                const isMine =
+                    availability === TimeSlotStatusValue.BOOKED &&
+                    currentUserId !== undefined &&
+                    status?.booking &&
+                    String(status.booking.userId) === String(currentUserId);
 
                 seatWithStatus.push({
                     id: seat.id,
@@ -104,11 +133,17 @@ router.get('/floor/:floorId', async (ctx) => {
                     hasSocket: seat.hasSocket,
                     isWindow: seat.isWindow,
                     zone: seat.zone,
-                    status: getSeatAvailabilityStatus(
-                        seat.status,
-                        status?.status
-                    ),
+                    status: Number(availability),
+                    isMine,
                     description: seat.description,
+                    booking: status?.booking
+                        ? {
+                              userId: status.booking.userId,
+                              startTime: status.booking.startTime,
+                              endTime: status.booking.endTime,
+                              timeSlot: status.booking.timeSlot,
+                          }
+                        : undefined,
                 });
             }
         } else {
@@ -146,7 +181,7 @@ router.get('/floor/:floorId', async (ctx) => {
  * @route GET /api/seats/search
  * @desc Search seats interface (must be before /:id)
  */
-router.get('/search', async (ctx) => {
+router.get('/search', optionalAuthMiddleware, async (ctx) => {
     try {
         const { keyword, date, timeSlot } = ctx.query as any;
 
@@ -156,7 +191,7 @@ router.get('/search', async (ctx) => {
         }
 
         // 模糊搜索座位
-        const keywordLike = `%${keyword}%`;
+        const keywordLike = `%${keyword}%` as any;
         const seats = await Seat.findAll({
             where: {
                 [Op.or]: [
@@ -167,6 +202,16 @@ router.get('/search', async (ctx) => {
                     },
                     {
                         zone: {
+                            [Op.like]: keywordLike,
+                        },
+                    },
+                    {
+                        rowNum: {
+                            [Op.like]: keywordLike,
+                        },
+                    },
+                    {
+                        colNum: {
                             [Op.like]: keywordLike,
                         },
                     },
@@ -186,22 +231,41 @@ router.get('/search', async (ctx) => {
             ],
         });
 
+        const currentUserId = (ctx as any).state.user?.id;
         const results = await Promise.all(
             seats.map(async (seat) => {
                 let status = getSeatAvailabilityStatus(seat.status);
+                let isMine = false;
 
                 if (date && timeSlot) {
-                    const slotStatus = await TimeSlotStatus.findOne({
+                    const slotStatus = (await TimeSlotStatus.findOne({
                         where: {
                             seatId: seat.id,
                             date,
                             timeSlot,
                         },
-                    });
-                    status = getSeatAvailabilityStatus(
+                        include: [
+                            {
+                                model: Booking,
+                                as: 'booking',
+                                attributes: ['userId'],
+                            },
+                        ],
+                    })) as any;
+                    const availability = getSeatAvailabilityStatus(
                         seat.status,
                         slotStatus?.status
                     );
+                    status = Number(availability);
+                    if (
+                        availability === TimeSlotStatusValue.BOOKED &&
+                        currentUserId !== undefined &&
+                        slotStatus?.booking &&
+                        String(slotStatus.booking.userId) ===
+                            String(currentUserId)
+                    ) {
+                        isMine = true;
+                    }
                 }
 
                 return {
@@ -215,6 +279,7 @@ router.get('/search', async (ctx) => {
                     floorName: (seat as any).floor?.name,
                     description: seat.description,
                     status,
+                    isMine,
                 };
             })
         );
@@ -268,14 +333,26 @@ router.get('/:id', async (ctx) => {
             floorName: (seat as any).floor?.name,
         };
 
-        // 如果提供了日期，查询时间段状态
+        // 如果提供了日期，查询时间段状态和预约区间
         if (date) {
-            const statuses = await TimeSlotStatus.findAll({
-                where: {
-                    seatId: seat.id,
-                    date,
-                },
-            });
+            const [statuses, bookings] = await Promise.all([
+                TimeSlotStatus.findAll({
+                    where: {
+                        seatId: seat.id,
+                        date,
+                    },
+                }),
+                Booking.findAll({
+                    where: {
+                        seatId: seat.id,
+                        date,
+                        status: {
+                            [Op.ne]: BookingStatus.CANCELED,
+                        },
+                    },
+                    attributes: ['timeSlot', 'startTime', 'endTime', 'status'],
+                }),
+            ]);
 
             result.timeSlotStatus = createTimeSlotStatusMap(seat.status);
 
@@ -285,6 +362,26 @@ router.get('/:id', async (ctx) => {
                     status.timeSlot,
                     status.status
                 );
+            });
+
+            const slotConfigs = await getTimeSlotConfigItems();
+            result.bookings = bookings.map((booking) => {
+                const config = getTimeSlotConfigItem(
+                    booking.timeSlot,
+                    slotConfigs
+                );
+                const startTime = booking.startTime
+                    ? String(booking.startTime).slice(0, 5)
+                    : config.startTime;
+                const endTime = booking.endTime
+                    ? String(booking.endTime).slice(0, 5)
+                    : config.endTime;
+                return {
+                    timeSlot: booking.timeSlot,
+                    startTime,
+                    endTime,
+                    status: booking.status,
+                };
             });
         }
 

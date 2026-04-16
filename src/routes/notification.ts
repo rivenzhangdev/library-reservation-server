@@ -1,10 +1,22 @@
 /* eslint-disable */
 import Router from 'koa-router';
 import { Notification, User } from '../models/mongodb';
+import { Booking, Seat } from '../models/mysql';
 import { authMiddleware, adminMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { ErrorCodes } from '../utils/error-codes';
 import { Roles } from '../constants/roles';
+import { normalizeNotificationType } from '../utils/enum-normalizers';
+import {
+    buildWechatTemplatePayload,
+    wechatTemplateConfig,
+    WechatTemplateType,
+} from '../utils/wechat-template-config';
+import {
+    getUserDisplayName,
+    getUserDisplayNameFromMap,
+} from '../utils/user-display';
+import { buildAuditFields, buildUpdatedBy } from '../utils/audit';
 
 const router = new Router({ prefix: '/api/notification' });
 
@@ -22,6 +34,9 @@ router.get('/', authMiddleware, async (ctx) => {
             page = 1,
             limit = 20,
             userId: queryUserId,
+            targetType,
+            targetRole,
+            floorId,
             timeRange,
             timeRangeStart,
             timeRangeEnd,
@@ -37,8 +52,21 @@ router.get('/', authMiddleware, async (ctx) => {
             if (queryUserId) query.userId = queryUserId;
         }
 
-        if (type) query.type = type;
+        if (type !== undefined && type !== null && type !== '') {
+            const normalizedType = normalizeNotificationType(type);
+            if (normalizedType !== undefined) query.type = normalizedType;
+        }
         if (isRead !== undefined) query.isRead = isRead === 'true';
+        if (targetType) query.targetType = targetType;
+        if (
+            targetRole !== undefined &&
+            targetRole !== null &&
+            targetRole !== ''
+        ) {
+            const parsedRole = Number(targetRole);
+            if (!Number.isNaN(parsedRole)) query.targetRole = parsedRole;
+        }
+        if (floorId) query.floorId = floorId;
 
         // Parse timeRange (array or string 'start~end' or csv)
         const parseRange = (dr: any) => {
@@ -97,35 +125,41 @@ router.get('/', authMiddleware, async (ctx) => {
             users.forEach((u: any) => (userMap[String(u._id)] = u));
         }
 
-        const mapped = (notifications || []).map((notif: any) => ({
-            id: notif._id,
-            title: notif.title,
-            content: notif.content,
-            type: notif.type,
-            time: notif.time,
-            isRead: notif.isRead,
-            relatedId: notif.relatedId,
-            userId: notif.userId?._id || notif.userId,
-            userAvatar:
-                (notif.userId && userMap[String(notif.userId)]?.avatar) ||
-                notif.userId?.avatar ||
-                '' ||
-                '',
-            publisher: notif.createdBy?._id || notif.createdBy,
-            publisherName:
-                notif.createdBy?.username ||
-                notif.createdBy?.name ||
-                userMap[String(notif.createdBy)]?.username ||
-                userMap[String(notif.createdBy)]?.name ||
-                undefined,
-            updatedBy: notif.updatedBy?._id || notif.updatedBy,
-            updatedByName:
-                notif.updatedBy?.username ||
-                notif.updatedBy?.name ||
-                userMap[String(notif.updatedBy)]?.username ||
-                userMap[String(notif.updatedBy)]?.name ||
-                undefined,
-        }));
+        const mapped = (notifications || []).map((notif: any) => {
+            const resolvedUserId = notif.userId?._id || notif.userId;
+            const userName = resolvedUserId
+                ? getUserDisplayNameFromMap(resolvedUserId, userMap) ||
+                  getUserDisplayName(notif.userId as any)
+                : undefined;
+            return {
+                id: notif._id,
+                title: notif.title,
+                content: notif.content,
+                type: notif.type,
+                time: notif.time,
+                isRead: notif.isRead,
+                relatedId: notif.relatedId,
+                userId: resolvedUserId,
+                userName,
+                userAvatar:
+                    (resolvedUserId &&
+                        userMap[String(resolvedUserId)]?.avatar) ||
+                    notif.userId?.avatar ||
+                    '' ||
+                    '',
+                publisher: notif.createdBy?._id || notif.createdBy,
+                publisherName:
+                    getUserDisplayName(notif.createdBy as any) ||
+                    getUserDisplayNameFromMap(notif.createdBy, userMap),
+                updatedBy: notif.updatedBy?._id || notif.updatedBy,
+                updatedByName:
+                    getUserDisplayName(notif.updatedBy as any) ||
+                    getUserDisplayNameFromMap(notif.updatedBy, userMap),
+                targetType: notif.targetType,
+                targetRole: notif.targetRole,
+                floorId: notif.floorId,
+            };
+        });
 
         ctx.body = {
             success: true,
@@ -146,13 +180,61 @@ router.get('/', authMiddleware, async (ctx) => {
 });
 
 /**
+ * @route GET /api/notification/template-ids
+ * @desc Get configured WeChat subscription template IDs
+ */
+router.get('/template-ids', authMiddleware, async (ctx) => {
+    try {
+        const bookingSuccessTemplateId =
+            wechatTemplateConfig.BOOKING_SUCCESS.templateId;
+        const bookingReminderTemplateId =
+            wechatTemplateConfig.BOOKING_REMINDER.templateId;
+
+        ctx.body = {
+            success: true,
+            data: {
+                BOOKING_SUCCESS: bookingSuccessTemplateId.startsWith(
+                    'TEMPLATE_ID_'
+                )
+                    ? ''
+                    : bookingSuccessTemplateId,
+                BOOKING_REMINDER: bookingReminderTemplateId.startsWith(
+                    'TEMPLATE_ID_'
+                )
+                    ? ''
+                    : bookingReminderTemplateId,
+            },
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to get template IDs',
+            ErrorCodes.INTERNAL_ERROR
+        );
+    }
+});
+
+/**
  * @route POST /api/notification
  * @desc Create notification (admin only)
  */
 router.post('/', authMiddleware, adminMiddleware, async (ctx) => {
     try {
         const body: any = ctx.request.body || {};
-        const { type, title, content, time, relatedId, data } = body;
+        const {
+            targetType = 'user',
+            userId,
+            role,
+            floorId,
+            type,
+            title,
+            content,
+            time,
+            relatedId,
+            data,
+            templateType,
+            templateData,
+        } = body;
 
         if (type === undefined || !title || !content) {
             throw new CustomError(
@@ -161,24 +243,128 @@ router.post('/', authMiddleware, adminMiddleware, async (ctx) => {
             );
         }
 
-        const currentUserId = (ctx as any).state.user.id;
-        // Do NOT allow client to set recipient or publisher manually.
-        // Use authenticated user as publisher; set recipient to current user by default.
-        const obj: any = {
-            userId: currentUserId,
-            createdBy: currentUserId,
-            type,
+        let resolvedTemplateType: WechatTemplateType | undefined;
+        let resolvedTemplateId: string | undefined;
+        let resolvedTemplatePage: string | undefined;
+        let resolvedTemplatePayload: any;
+        let resolvedTemplateSourceData: any;
+
+        if (templateType) {
+            if (!wechatTemplateConfig[templateType as WechatTemplateType]) {
+                throw new CustomError(
+                    'Invalid template type',
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+            resolvedTemplateType = templateType as WechatTemplateType;
+            const config = wechatTemplateConfig[resolvedTemplateType];
+            resolvedTemplateId = config.templateId;
+            resolvedTemplatePage = config.page;
+            resolvedTemplateSourceData = templateData || data || {};
+            resolvedTemplatePayload = buildWechatTemplatePayload(
+                resolvedTemplateType,
+                resolvedTemplateSourceData
+            );
+        }
+
+        const normalizedType = normalizeNotificationType(type);
+        const createdByFields = buildAuditFields(ctx);
+        const timestamp = time ? new Date(time) : new Date();
+
+        let recipients: Array<{ _id: any }> = [];
+        let targetRoleValue: number | undefined;
+        let targetFloorValue: string | undefined;
+
+        if (targetType === 'all') {
+            recipients = await User.find().select('_id').lean();
+        } else if (targetType === 'role') {
+            if (role === undefined || role === null) {
+                throw new CustomError(
+                    'Missing role for role audience',
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+            targetRoleValue = Number(role);
+            recipients = await User.find({ role: targetRoleValue })
+                .select('_id')
+                .lean();
+        } else if (targetType === 'floor') {
+            if (!floorId) {
+                throw new CustomError(
+                    'Missing floorId for floor audience',
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+            targetFloorValue = floorId;
+            const bookings = await Booking.findAll({
+                include: [
+                    {
+                        model: Seat,
+                        as: 'seat',
+                        where: { floorId },
+                        attributes: ['floorId'],
+                    },
+                ],
+                attributes: ['userId'],
+                group: ['userId'],
+            });
+            const userIds = Array.from(
+                new Set(bookings.map((booking: any) => booking.userId))
+            );
+            if (userIds.length > 0) {
+                recipients = await User.find({ _id: { $in: userIds } })
+                    .select('_id')
+                    .lean();
+            }
+        } else {
+            if (!userId) {
+                throw new CustomError(
+                    'Missing userId for user audience',
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+            const targetUser = await User.findById(userId);
+            if (!targetUser) {
+                throw new CustomError(
+                    'Target user not found',
+                    ErrorCodes.USER_NOT_FOUND
+                );
+            }
+            recipients = [targetUser];
+        }
+
+        if (!recipients.length) {
+            throw new CustomError(
+                'No target users matched the selected audience',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        const docs = recipients.map((recipient) => ({
+            userId: recipient._id,
+            targetType,
+            targetRole: targetRoleValue,
+            floorId: targetFloorValue,
+            ...createdByFields,
+            type: normalizedType ?? type,
             title,
             content,
-            updatedBy: currentUserId,
+            relatedId,
+            data,
+            templateType: resolvedTemplateType,
+            templateId: resolvedTemplateId,
+            templatePage: resolvedTemplatePage,
+            templateData: resolvedTemplateSourceData,
+            templatePayload: resolvedTemplatePayload,
+            time: timestamp,
+        }));
+
+        const created = await Notification.insertMany(docs as any[]);
+
+        ctx.body = {
+            success: true,
+            data: { created: created.length },
         };
-        if (relatedId) obj.relatedId = relatedId;
-        if (data) obj.data = data;
-        if (time) obj.time = new Date(time);
-
-        const created = await Notification.create(obj as any);
-
-        ctx.body = { success: true, data: { id: created._id } };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError(
@@ -215,6 +401,7 @@ router.post('/read/:id', authMiddleware, async (ctx) => {
         }
 
         notification.isRead = true;
+        Object.assign(notification, buildUpdatedBy(ctx));
         await notification.save();
 
         ctx.body = {
@@ -339,12 +526,23 @@ router.get('/:id', authMiddleware, async (ctx) => {
             : [];
         const userMap: Record<string, any> = {};
         users.forEach((u: any) => (userMap[String(u._id)] = u));
+        const createdBy = notification.createdBy as any;
+        const updatedBy = notification.updatedBy as any;
+        const createdByKey = String(createdBy?._id ?? createdBy ?? '');
+        const updatedByKey = String(updatedBy?._id ?? updatedBy ?? '');
+
+        const resolvedUserId = notification.userId?._id || notification.userId;
+        const userName = resolvedUserId
+            ? getUserDisplayNameFromMap(resolvedUserId, userMap) ||
+              getUserDisplayName(notification.userId as any)
+            : undefined;
 
         ctx.body = {
             success: true,
             data: {
                 id: notification._id,
-                userId: notification.userId,
+                userId: resolvedUserId,
+                userName,
                 title: notification.title,
                 content: notification.content,
                 type: notification.type,
@@ -352,22 +550,14 @@ router.get('/:id', authMiddleware, async (ctx) => {
                 relatedId: notification.relatedId,
                 time: notification.time,
                 isRead: notification.isRead,
-                publisher:
-                    notification.createdBy?._id || notification.createdBy,
+                publisher: createdBy?._id || createdBy,
                 publisherName:
-                    notification.createdBy?.username ||
-                    notification.createdBy?.name ||
-                    userMap[String(notification.createdBy)]?.username ||
-                    userMap[String(notification.createdBy)]?.name ||
-                    undefined,
-                updatedBy:
-                    notification.updatedBy?._id || notification.updatedBy,
+                    getUserDisplayName(createdBy as any) ||
+                    getUserDisplayNameFromMap(createdByKey, userMap),
+                updatedBy: updatedBy?._id || updatedBy,
                 updatedByName:
-                    notification.updatedBy?.username ||
-                    notification.updatedBy?.name ||
-                    userMap[String(notification.updatedBy)]?.username ||
-                    userMap[String(notification.updatedBy)]?.name ||
-                    undefined,
+                    getUserDisplayName(updatedBy as any) ||
+                    getUserDisplayNameFromMap(updatedByKey, userMap),
             },
         };
     } catch (error: any) {
@@ -403,6 +593,22 @@ router.patch('/:id', authMiddleware, adminMiddleware, async (ctx) => {
         if (body.relatedId !== undefined) allowed.relatedId = body.relatedId;
         if (body.data !== undefined) allowed.data = body.data;
         if (body.time !== undefined) allowed.time = new Date(body.time);
+        if (body.userId !== undefined) {
+            if (!body.userId) {
+                throw new CustomError(
+                    'Missing userId',
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+            const targetUser = await User.findById(body.userId);
+            if (!targetUser) {
+                throw new CustomError(
+                    'Target user not found',
+                    ErrorCodes.USER_NOT_FOUND
+                );
+            }
+            allowed.userId = targetUser._id;
+        }
 
         // apply updates
         Object.assign(notification, allowed);

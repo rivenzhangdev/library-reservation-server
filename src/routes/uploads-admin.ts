@@ -3,6 +3,7 @@ import { authMiddleware, optionalAuthMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { ErrorCodes } from '../utils/error-codes';
 import { Upload } from '../models/mongodb';
+import { getUserDisplayName } from '../utils/user-display';
 import {
     deleteUploadById,
     saveBase64Image,
@@ -26,7 +27,7 @@ function makeAbsoluteUrl(ctx: any, url: string) {
         return url;
     }
     const backendBase = (
-        process.env.BACKEND_URL || `${ctx.protocol}://${ctx.host}`
+        process.env.BACKEND_URL ?? `${ctx.protocol}://${ctx.host}`
     ).replace(/\/+$/g, '');
     const normalizedUrl = url.replace(/\/\/{2,}/g, '/');
     return normalizedUrl.startsWith('/')
@@ -52,8 +53,10 @@ router.get('/', authMiddleware, async (ctx) => {
             ...item,
             url: makeAbsoluteUrl(
                 ctx,
-                normalizeUploadUrl(String(item.url || ''))
+                normalizeUploadUrl(String(item.url ?? ''))
             ),
+            uploaderName:
+                item.uploaderName ?? getUserDisplayName(item.uploaderId as any),
         }));
         ctx.body = {
             success: true,
@@ -75,8 +78,7 @@ const handleUpload = async (ctx: any) => {
     const dataUrl = body?.dataUrl;
     if (!dataUrl) ctx.throw(400, 'Missing dataUrl');
     const uploaderId = ctx.state?.user?.id;
-    const uploaderName =
-        ctx.state?.user?.name || ctx.state?.user?.username || undefined;
+    const uploaderName = ctx.state?.user?.name ?? undefined;
     let url = await saveBase64Image(dataUrl, uploaderId, uploaderName);
     url = makeAbsoluteUrl(ctx, url);
     console.log('Saved upload ->', url);
@@ -90,7 +92,7 @@ router.post('/', optionalAuthMiddleware, async (ctx) => {
         console.error('Upload failed', e);
         if (e.isCustom) throw e;
         throw new CustomError(
-            e?.message || 'Upload failed',
+            e?.message ?? 'Upload failed',
             ErrorCodes.INTERNAL_ERROR,
             500
         );
@@ -104,7 +106,7 @@ router.post('/upload', optionalAuthMiddleware, async (ctx) => {
         console.error('Upload failed (alias /upload)', e);
         if (e.isCustom) throw e;
         throw new CustomError(
-            e?.message || 'Upload failed',
+            e?.message ?? 'Upload failed',
             ErrorCodes.INTERNAL_ERROR,
             500
         );
@@ -124,6 +126,31 @@ router.delete('/:id', authMiddleware, async (ctx) => {
     } catch (e: any) {
         if (e.isCustom) throw e;
         throw new CustomError('Failed to delete upload', 500);
+    }
+});
+
+router.post('/batch-delete', authMiddleware, async (ctx) => {
+    try {
+        requireAdmin(ctx);
+        const body = ctx.request.body as any;
+        const ids = body?.ids;
+        if (!Array.isArray(ids) || ids.length === 0) {
+            throw new CustomError('Missing ids', ErrorCodes.INVALID_PARAMS);
+        }
+        const results = await Promise.all(
+            ids.map((id: string) => deleteUploadById(String(id)))
+        );
+        if (results.some((ok) => !ok)) {
+            throw new CustomError(
+                'One or more uploads not found',
+                ErrorCodes.NOT_FOUND,
+                404
+            );
+        }
+        ctx.body = { success: true };
+    } catch (e: any) {
+        if (e.isCustom) throw e;
+        throw new CustomError('Failed to delete uploads', 500);
     }
 });
 

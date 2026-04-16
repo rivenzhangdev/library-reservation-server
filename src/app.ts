@@ -17,13 +17,16 @@ import { errorHandler } from './middleware/error';
 import authRoutes from './routes/auth';
 import userRoutes from './routes/user';
 import seatRoutes from './routes/seats';
-import bookingRoutes from './routes/booking';
+import bookingRoutes, { markAllExpiredBookings } from './routes/booking';
 import notificationRoutes from './routes/notification';
 import activityRoutes from './routes/activity';
 import feedbackRoutes from './routes/feedback';
+import configRoutes from './routes/config';
 import compatRoutes from './routes/compat';
 import uploadsRoutes from './routes/uploads';
 import uploadsAdminRoutes from './routes/uploads-admin';
+import studentIdChangeRequestsRoutes from './routes/studentIdChangeRequests';
+import phoneChangeRequestsRoutes from './routes/phoneChangeRequests';
 
 // 导入数据库连接
 import { testConnection, syncDatabase } from './database/mysql';
@@ -127,13 +130,14 @@ app.use(corsMiddleware);
 app.use(
     bodyParser({
         enableTypes: ['json', 'form', 'text'],
+        strict: false,
         jsonLimit: '10mb',
         formLimit: '10mb',
         textLimit: '10mb',
     })
 );
 console.log(
-    'koa-bodyparser configured: jsonLimit=10mb, formLimit=10mb, textLimit=10mb'
+    'koa-bodyparser configured: strict=false, jsonLimit=10mb, formLimit=10mb, textLimit=10mb'
 );
 
 // 清理空查询参数，避免接口接收到空字符串导致查询条件异常
@@ -148,6 +152,8 @@ app.use(seatRoutes.routes()).use(seatRoutes.allowedMethods());
 
 app.use(bookingRoutes.routes()).use(bookingRoutes.allowedMethods());
 
+app.use(configRoutes.routes()).use(configRoutes.allowedMethods());
+
 app.use(notificationRoutes.routes()).use(notificationRoutes.allowedMethods());
 
 app.use(activityRoutes.routes()).use(activityRoutes.allowedMethods());
@@ -159,6 +165,13 @@ app.use(uploadsRoutes.routes()).use(uploadsRoutes.allowedMethods());
 
 // admin uploads management (includes public POST /api/uploads for compatibility)
 app.use(uploadsAdminRoutes.routes()).use(uploadsAdminRoutes.allowedMethods());
+
+app.use(studentIdChangeRequestsRoutes.routes()).use(
+    studentIdChangeRequestsRoutes.allowedMethods()
+);
+app.use(phoneChangeRequestsRoutes.routes()).use(
+    phoneChangeRequestsRoutes.allowedMethods()
+);
 
 // 兼容管理端调用的路由（/api/bookings, /api/seat, /api/floors 等）
 app.use(compatRoutes.routes()).use(compatRoutes.allowedMethods());
@@ -182,6 +195,27 @@ async function startServer() {
 
         // 配置模型关系
         setupMySQLModelRelations();
+
+        // 立即执行一次过期预约扫描，补齐被动触发缺口
+        await markAllExpiredBookings();
+        const violationScanIntervalMinutes = Number(
+            process.env.VIOLATION_SCAN_INTERVAL_MINUTES || 15
+        );
+        if (violationScanIntervalMinutes > 0) {
+            setInterval(
+                async () => {
+                    try {
+                        await markAllExpiredBookings();
+                    } catch (error) {
+                        console.error(
+                            'Failed to scan expired bookings:',
+                            error
+                        );
+                    }
+                },
+                violationScanIntervalMinutes * 60 * 1000
+            );
+        }
 
         // 在真正监听之前检查端口占用并提供交互式处理（若为 TTY）
         const desiredPort = PORT;

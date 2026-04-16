@@ -4,25 +4,25 @@ const dotenv = require('dotenv');
 
 dotenv.config();
 
-const MONGO = process.env.MONGO_URI || 'mongodb://localhost:27017/library_booking_dev';
+const MONGO =
+  process.env.DB_MONGODB_URI_DEV ||
+  process.env.DB_MONGODB_URI ||
+  'mongodb://localhost:27017/library_booking_dev';
 
-async function ensureUser(col, { username, password, name, role }) {
+async function ensureSuperAdmin(col, { username, password, name, role }) {
   const now = new Date();
   const existing = await col.findOne({ username });
   const hash = password ? await bcrypt.hash(password, 10) : null;
+  const roleValue = typeof role === 'number' ? role : 1;
 
-  const normalizeRole = (r) => {
-    if (typeof r === 'number') return r;
-    if (typeof r === 'string') return r === 'admin' ? 1 : 0;
-    return 0;
-  };
-
+  const isSuperAdmin = username === 'ray.zhang';
   if (!existing) {
     const doc = {
       username,
       password: hash,
       name: name || username,
-      role: normalizeRole(role),
+      role: roleValue,
+      isSuperAdmin,
       creditScore: 100,
       blacklisted: false,
       settings: {},
@@ -34,7 +34,11 @@ async function ensureUser(col, { username, password, name, role }) {
     const res = await col.insertOne(doc);
     return await col.findOne({ _id: res.insertedId });
   } else {
-    const update = { role: normalizeRole(role) ?? existing.role, updatedAt: now };
+    const update = {
+      role: roleValue ?? existing.role,
+      updatedAt: now,
+      isSuperAdmin: existing.isSuperAdmin || isSuperAdmin,
+    };
     if (hash) update.password = hash;
     if (name) update.name = name;
     await col.updateOne({ _id: existing._id }, { $set: update });
@@ -46,28 +50,18 @@ async function main() {
   await mongoose.connect(MONGO, { useNewUrlParser: true, useUnifiedTopology: true });
   const col = mongoose.connection.collection('users');
 
-  console.log('Ensuring default accounts in', MONGO);
+  console.log('Ensuring super admin in', MONGO);
 
-  // Guest account
-  const guest = await ensureUser(col, {
-    username: 'guest',
-    password: null, // guest has no password
-    name: '游客',
-    role: 0,
-  });
-  console.log('Guest ensured:', guest.username);
-
-  // Admin account specified by the user
   const adminPassword = process.argv[2] || 'Zrb20040801.';
-  const admin = await ensureUser(col, {
+  const admin = await ensureSuperAdmin(col, {
     username: 'ray.zhang',
     password: adminPassword,
     name: 'Ray Zhang',
     role: 1,
   });
-  console.log('Admin ensured:', admin.username);
+  console.log('Super admin ensured:', admin.username);
 
-  console.log('Default accounts ensured. Admin login:', 'ray.zhang', 'Password:', adminPassword);
+  console.log('Super admin login:', 'ray.zhang', 'Password:', adminPassword);
   process.exit(0);
 }
 
