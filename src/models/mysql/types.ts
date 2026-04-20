@@ -53,6 +53,35 @@ export enum BookingStatus {
 }
 
 /**
+ * 变更申请类型
+ */
+export enum ChangeRequestType {
+    RESCHEDULE = 'reschedule',
+    SEAT_CHANGE = 'seat_change',
+    CANCEL = 'cancel',
+}
+
+/**
+ * 变更申请状态
+ */
+export enum ChangeRequestStatus {
+    PENDING = 'pending',
+    APPROVED = 'approved',
+    REJECTED = 'rejected',
+    AUTO_APPROVED = 'auto_approved',
+}
+
+/**
+ * 预约规则分类
+ */
+export enum BookingRuleCategory {
+    BOOKING = 'booking',
+    RENEWAL = 'renewal',
+    CANCEL = 'cancel',
+    GENERAL = 'general',
+}
+
+/**
  * 时间段状态
  * 0: 可用
  * 1: 已预约

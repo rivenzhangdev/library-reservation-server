@@ -2,13 +2,22 @@ import Router from 'koa-router';
 import { authMiddleware, adminMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { Notification, User, PhoneChangeRequest } from '../models/mongodb';
+import { getUserDisplayName } from '../utils/user-display';
+import { maskPhone } from '../utils/mask';
 import { ErrorCodes } from '../utils/error-codes';
+import { formatRouteDateTimes } from '../utils/route-time-serializer';
 
 const router = new Router({ prefix: '/api/phone-change-requests' });
 
 router.get('/', authMiddleware, adminMiddleware, async (ctx) => {
     try {
-        const { status, q, page = '1', limit = '20' } = ctx.query as any;
+        const {
+            status,
+            q,
+            page = '1',
+            pageSize,
+            limit = '20',
+        } = ctx.query as any;
 
         const query: any = {};
         if (status) {
@@ -22,13 +31,16 @@ router.get('/', authMiddleware, adminMiddleware, async (ctx) => {
         }
 
         const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-        const pageSize = Math.max(parseInt(limit, 10) || 20, 1);
+        const normalizedPageSize = Math.max(
+            parseInt(String(pageSize ?? limit), 10) || 20,
+            1
+        );
 
         const total = await PhoneChangeRequest.countDocuments(query);
         const requests = await PhoneChangeRequest.find(query)
             .sort({ createdAt: -1 })
-            .skip((pageNum - 1) * pageSize)
-            .limit(pageSize)
+            .skip((pageNum - 1) * normalizedPageSize)
+            .limit(normalizedPageSize)
             .populate('userId', 'username name studentId')
             .lean();
 
@@ -36,13 +48,17 @@ router.get('/', authMiddleware, adminMiddleware, async (ctx) => {
             success: true,
             data: {
                 list: requests.map((item: any) => ({
-                    ...item,
-                    id: item._id,
-                    userName:
-                        getUserDisplayName(item.userId as any) ??
-                        String(item.userId?.studentId ?? ''),
+                    ...formatRouteDateTimes({
+                        ...item,
+                        id: item._id,
+                        userName:
+                            getUserDisplayName(item.userId as any) ??
+                            String(item.userId?.studentId ?? ''),
+                    }),
                 })),
                 total,
+                page: pageNum,
+                pageSize: normalizedPageSize,
             },
         };
     } catch (error: any) {
@@ -106,7 +122,9 @@ router.put('/:id/approve', authMiddleware, adminMiddleware, async (ctx) => {
             updatedBy: reviewerId,
             type: 0,
             title: 'Phone change approved',
-            content: `Your phone number has been updated to ${request.newPhone}.`,
+            content: `Your phone number has been updated to ${maskPhone(
+                request.newPhone
+            )}.`,
             relatedId: request._id.toString(),
         });
 

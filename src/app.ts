@@ -12,6 +12,7 @@ import inquirer from 'inquirer';
 import { corsMiddleware } from './middleware/cors';
 import { queryCleaner } from './middleware/queryCleaner';
 import { errorHandler } from './middleware/error';
+import { auditNameNormalizer } from './middleware/audit-name-normalizer';
 
 // 导入路由
 import authRoutes from './routes/auth';
@@ -27,6 +28,11 @@ import uploadsRoutes from './routes/uploads';
 import uploadsAdminRoutes from './routes/uploads-admin';
 import studentIdChangeRequestsRoutes from './routes/studentIdChangeRequests';
 import phoneChangeRequestsRoutes from './routes/phoneChangeRequests';
+import bookingRulesRoutes from './routes/booking-rules';
+import bookingChangeRequestsRoutes from './routes/booking-change-requests';
+import auditLogRoutes from './routes/audit-logs';
+import dashboardRoutes from './routes/dashboard';
+import { markAllExpiredActivities } from './services/activity-service';
 
 // 导入数据库连接
 import { testConnection, syncDatabase } from './database/mysql';
@@ -68,7 +74,7 @@ function getPidsByPort(port: number): Promise<number[]> {
         if (platform === 'win32') {
             exec(
                 `netstat -ano | findstr :${port}`,
-                { shell: true },
+                { shell: 'cmd.exe' },
                 (err: any, stdout: string) => {
                     if (err || !stdout) return resolve([]);
                     const lines = stdout.split(/\r?\n/).filter(Boolean);
@@ -86,7 +92,7 @@ function getPidsByPort(port: number): Promise<number[]> {
             // 优先使用 lsof -t，若不可用返回空
             exec(
                 `lsof -i :${port} -t`,
-                { shell: true },
+                { shell: 'sh' },
                 (err: any, stdout: string) => {
                     if (err || !stdout) return resolve([]);
                     const lines = stdout.split(/\r?\n/).filter(Boolean);
@@ -107,12 +113,12 @@ function killPids(pids: number[]): Promise<boolean> {
         if (platform === 'win32') {
             const args = pids.map((pid) => `/PID ${pid}`).join(' ');
             const cmd = `taskkill /F ${args}`;
-            exec(cmd, { shell: true }, (err: any) => {
+            exec(cmd, { shell: 'cmd.exe' }, (err: any) => {
                 resolve(!err);
             });
         } else {
             const cmd = `kill -9 ${pids.join(' ')}`;
-            exec(cmd, { shell: true }, (err: any) => {
+            exec(cmd, { shell: 'sh' }, (err: any) => {
                 resolve(!err);
             });
         }
@@ -142,6 +148,9 @@ console.log(
 
 // 清理空查询参数，避免接口接收到空字符串导致查询条件异常
 app.use(queryCleaner);
+
+// 统一补齐 createdByName/updatedByName/reviewerName/publisherName，避免各路由重复处理
+app.use(auditNameNormalizer);
 
 // 注册路由
 app.use(authRoutes.routes()).use(authRoutes.allowedMethods());
@@ -173,6 +182,14 @@ app.use(phoneChangeRequestsRoutes.routes()).use(
     phoneChangeRequestsRoutes.allowedMethods()
 );
 
+// 企业增强功能路由
+app.use(bookingRulesRoutes.routes()).use(bookingRulesRoutes.allowedMethods());
+app.use(bookingChangeRequestsRoutes.routes()).use(
+    bookingChangeRequestsRoutes.allowedMethods()
+);
+app.use(auditLogRoutes.routes()).use(auditLogRoutes.allowedMethods());
+app.use(dashboardRoutes.routes()).use(dashboardRoutes.allowedMethods());
+
 // 兼容管理端调用的路由（/api/bookings, /api/seat, /api/floors 等）
 app.use(compatRoutes.routes()).use(compatRoutes.allowedMethods());
 
@@ -196,8 +213,9 @@ async function startServer() {
         // 配置模型关系
         setupMySQLModelRelations();
 
-        // 立即执行一次过期预约扫描，补齐被动触发缺口
+        // 立即执行一次过期预约和活动扫描，补齐被动触发缺口
         await markAllExpiredBookings();
+        await markAllExpiredActivities();
         const violationScanIntervalMinutes = Number(
             process.env.VIOLATION_SCAN_INTERVAL_MINUTES || 15
         );
@@ -206,9 +224,10 @@ async function startServer() {
                 async () => {
                     try {
                         await markAllExpiredBookings();
+                        await markAllExpiredActivities();
                     } catch (error) {
                         console.error(
-                            'Failed to scan expired bookings:',
+                            'Failed to scan expired bookings or activities:',
                             error
                         );
                     }

@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
+import { inspect } from 'util';
 import * as path from 'path';
 
 const UPLOAD_DIR = path.join(process.cwd(), 'uploads');
@@ -198,7 +199,24 @@ export async function saveBase64Image(
         throw new Error('MinIO is not configured for uploads');
     }
     const url = getUploadUrl(name);
-    await uploadToMinio(name, mime, buf);
+    try {
+        await uploadToMinio(name, mime, buf);
+    } catch (uploadError: any) {
+        console.error('MinIO PUT failed', {
+            bucket: MINIO_BUCKET,
+            endpoint: MINIO_ENDPOINT,
+            port: MINIO_PORT,
+            objectName: name,
+            mime,
+            size: buf.length,
+            error: inspect(uploadError, { depth: 6 }),
+        });
+        throw new Error(
+            `MinIO upload failed: ${
+                uploadError?.message || String(uploadError)
+            }`
+        );
+    }
 
     // persist metadata to Mongo Uploads collection if available
     try {

@@ -6,21 +6,57 @@ import {
 } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { Feedback, User } from '../models/mongodb';
-import { Roles } from '../constants/roles';
-import { Upload } from '../models/mongodb';
 import { normalizeNumericEnum } from '../utils/enum-normalizers';
 import { buildUpdatedBy } from '../utils/audit';
 import { ErrorCodes } from '../utils/error-codes';
 import { getUserDisplayName } from '../utils/user-display';
+import { FeedbackStatus } from '../constants/feedback';
+import { feedbackRouteDependencies } from '../services/feedback-service';
+import {
+    formatRouteDateTime,
+    formatRouteDateTimes,
+} from '../utils/route-time-serializer';
+
+const {
+    submitFeedback,
+    getUserFeedbacks,
+    listFeedback,
+    getFeedbackDetail,
+    addFeedbackComment,
+    removeFeedbackImage,
+    exportFeedbacks,
+} = feedbackRouteDependencies;
 
 const router = new Router({ prefix: '/api/feedback' });
 
-// 反馈状态枚举 (数字类型)
-enum FeedbackStatus {
-    PENDING = 1, // 待处理
-    PROCESSING = 2, // 处理中
-    RESOLVED = 3, // 已解决
-    REJECTED = 4, // 已拒绝
+function appendOfficialFeedbackRecord(
+    feedback: any,
+    user: any,
+    content: string
+) {
+    const normalizedContent = String(content || '').trim();
+    if (!normalizedContent) return;
+
+    const operator = user?.name || user?.username || 'system';
+    const lastComment = Array.isArray(feedback.comments)
+        ? feedback.comments[feedback.comments.length - 1]
+        : undefined;
+
+    if (
+        lastComment?.isOfficial &&
+        String(lastComment.operator || '') === operator &&
+        String(lastComment.content || '') === normalizedContent
+    ) {
+        return;
+    }
+
+    feedback.comments = feedback.comments || [];
+    feedback.comments.push({
+        operator,
+        content: normalizedContent,
+        date: new Date(),
+        isOfficial: true,
+    } as any);
 }
 
 /**
@@ -29,7 +65,7 @@ enum FeedbackStatus {
  *
  * @body {
  *   typeId: 1|2|3|4 [required] (1:功能建议，2:问题上报，3:投诉建议，4:其他)
- *   urgencyId: 1|2|3|4 [optional] (1:低，2:中，3:高，4:紧急)
+ *   urgencyId: 1|2|3|4 [required] (1:低，2:中，3:高，4:紧急)
  *   title: string [required]
  *   description: string [required]
  *   contact: string [optional]
@@ -42,7 +78,7 @@ enum FeedbackStatus {
  *     id: string
  *     userId: string
  *     typeId: 1|2|3|4
- *     urgencyId: 1|2|3|4|null
+ *     urgencyId: 1|2|3|4
  *     title: string
  *     description: string
  *     contact: string|null
@@ -52,27 +88,23 @@ enum FeedbackStatus {
  *   }
  * }
  */
-router.post('/', optionalAuthMiddleware, async (ctx) => {
+router.post('/', authMiddleware, async (ctx) => {
     try {
-        // 如果有登录用户则使用登录用户，否则使用 guest 用户作为默认提交者
-        let userId = (ctx as any).state.user?.id;
+        const userId = (ctx as any).state.user?.id;
         if (!userId) {
-            // 尝试查找 guest 用户
-            const guest = await User.findOne({ username: 'guest' });
-            if (guest) userId = guest._id;
+            throw new CustomError('Missing user', ErrorCodes.INVALID_PARAMS);
         }
 
         const { typeId, urgencyId, title, description, contact, images } = ctx
             .request.body as any;
 
-        if (!typeId || !title || !description) {
+        if (!typeId || !urgencyId || !title || !description) {
             throw new CustomError(
                 'Missing required parameters',
                 ErrorCodes.INVALID_PARAMS
             );
         }
 
-        // 支持 numeric (1..4) 或 string ('suggestion'...) 的 typeId 与 urgencyId
         const typeMap: any = {
             1: 1,
             2: 2,
@@ -107,20 +139,28 @@ router.post('/', optionalAuthMiddleware, async (ctx) => {
         };
 
         const t = typeMap[typeId] || 4;
-        const u = urgencyId ? urgencyMap[urgencyId] || undefined : undefined;
+        const u = urgencyMap[urgencyId];
+        if (!u) {
+            throw new CustomError(
+                'Invalid urgencyId',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
 
-        const feedback = await Feedback.create({
-            userId,
-            typeId: t,
-            typeName: typeNameMap[t] || '',
-            urgencyId: u,
-            urgencyName: u ? urgencyNameMap[u] : undefined,
-            title,
-            description,
-            contact,
-            images: images ?? [],
-            status: FeedbackStatus.PENDING,
-        });
+        const feedback = await submitFeedback(
+            {
+                userId,
+                typeId: t,
+                typeName: typeNameMap[t] || '',
+                urgencyId: u,
+                urgencyName: urgencyNameMap[u],
+                title,
+                description,
+                contact,
+                images: images ?? [],
+            },
+            { id: userId }
+        );
 
         const feedbackWithUser = await Feedback.findById(feedback._id).populate(
             'userId',
@@ -130,7 +170,9 @@ router.post('/', optionalAuthMiddleware, async (ctx) => {
         ctx.body = {
             success: true,
             data: {
-                id: feedbackWithUser?._id,
+                id: feedbackWithUser?._id
+                    ? String(feedbackWithUser._id)
+                    : undefined,
                 userId: feedbackWithUser?.userId,
                 typeId: feedbackWithUser?.typeId,
                 typeName: feedbackWithUser?.typeName,
@@ -141,7 +183,7 @@ router.post('/', optionalAuthMiddleware, async (ctx) => {
                 contact: feedbackWithUser?.contact,
                 images: feedbackWithUser?.images,
                 status: feedbackWithUser?.status,
-                createdAt: feedbackWithUser?.createdAt,
+                createdAt: formatRouteDateTime(feedbackWithUser?.createdAt),
             },
         };
     } catch (error: any) {
@@ -159,7 +201,7 @@ router.post('/', optionalAuthMiddleware, async (ctx) => {
  * @desc 获取我的反馈列表接口
  *
  * @query_param {integer} page - 页码（默认 1）
- * @query_param {integer} limit - 每页数量（默认 20）
+ * @query_param {integer} pageSize - 每页数量（默认 20）
  *
  * @response 200 {
  *   success: boolean
@@ -178,7 +220,7 @@ router.post('/', optionalAuthMiddleware, async (ctx) => {
  *     }>
  *     total: integer
  *     page: integer
- *     limit: integer
+ *     pageSize: integer
  *   }
  * }
  */
@@ -186,37 +228,37 @@ router.get('/my', authMiddleware, async (ctx) => {
     try {
         const userId = (ctx as any).state.user.id;
         const page = parseInt((ctx.query.page as string) || '1');
-        const limit = parseInt((ctx.query.limit as string) || '20');
+        const pageSize = parseInt(
+            (ctx.query.pageSize as string) ||
+                (ctx.query.limit as string) ||
+                '20'
+        );
 
-        const total = await Feedback.countDocuments({ userId });
-
-        const feedbacks = await Feedback.find({ userId })
-            .sort({ createdAt: -1 })
-            .skip((page - 1) * limit)
-            .limit(limit)
-            .select(
-                'id typeId urgencyId title description images status reply replyAt createdAt comments'
-            );
+        const { total, feedbacks } = await getUserFeedbacks(
+            userId,
+            page,
+            pageSize
+        );
 
         ctx.body = {
             success: true,
             data: {
-                feedbacks: feedbacks.map((fb) => ({
-                    id: fb._id,
-                    typeId: fb.typeId, // 数字类型
-                    urgencyId: fb.urgencyId, // 数字类型
+                list: feedbacks.map((fb: any) => ({
+                    id: String(fb._id),
+                    typeId: fb.typeId,
+                    urgencyId: fb.urgencyId,
                     title: fb.title,
                     description: fb.description,
                     images: fb.images,
-                    status: fb.status, // 数字类型
+                    status: fb.status,
                     reply: fb.reply,
-                    replyAt: fb.replyAt,
+                    replyAt: formatRouteDateTime(fb.replyAt),
                     commentsCount: (fb.comments || []).length,
-                    createdAt: fb.createdAt,
+                    createdAt: formatRouteDateTime(fb.createdAt),
                 })),
                 total,
                 page,
-                limit,
+                pageSize,
             },
         };
     } catch (error: any) {
@@ -237,25 +279,33 @@ router.get('/my', authMiddleware, async (ctx) => {
 router.get('/list', authMiddleware, adminMiddleware, async (ctx) => {
     try {
         const page = parseInt((ctx.query.page as string) || '1');
-        const limit = parseInt((ctx.query.limit as string) || '20');
+        const pageSize = parseInt(
+            (ctx.query.pageSize as string) ||
+                (ctx.query.limit as string) ||
+                '20'
+        );
+        const title = String(ctx.query.title || '').trim();
+        const typeId = normalizeNumericEnum(ctx.query.typeId as any);
+        const status = normalizeNumericEnum(ctx.query.status as any);
+        const urgencyId = normalizeNumericEnum(ctx.query.urgencyId as any);
 
-        const total = await Feedback.countDocuments();
+        const filters: any = {};
+        if (title) filters.title = title;
+        if (typeId !== undefined) filters.typeId = typeId;
+        if (status !== undefined) filters.status = status;
+        if (urgencyId !== undefined) filters.urgencyId = urgencyId;
 
-        const feedbacks = await Feedback.find()
-            .sort({ createdAt: -1 })
-            .skip((page - 1) * limit)
-            .limit(limit)
-            .populate('userId', 'name avatar studentId username')
-            .populate('updatedBy', 'name username')
-            .select(
-                'id userId typeId typeName urgencyId urgencyName title description images status reply replyAt createdAt updatedBy comments'
-            );
+        const { total, feedbacks } = await listFeedback(
+            page,
+            pageSize,
+            filters
+        );
 
         ctx.body = {
             success: true,
             data: {
-                feedbacks: feedbacks.map((fb: any) => ({
-                    id: fb._id,
+                list: feedbacks.map((fb: any) => ({
+                    id: String(fb._id),
                     userId: fb.userId,
                     typeId: fb.typeId,
                     typeName: fb.typeName,
@@ -266,15 +316,19 @@ router.get('/list', authMiddleware, adminMiddleware, async (ctx) => {
                     images: fb.images,
                     status: fb.status,
                     reply: fb.reply,
-                    replyAt: fb.replyAt,
+                    replyAt: formatRouteDateTime(fb.replyAt),
                     commentsCount: (fb.comments || []).length,
-                    createdAt: fb.createdAt,
+                    createdAt: formatRouteDateTime(fb.createdAt),
                     updatedBy: fb.updatedBy?._id || fb.updatedBy,
-                    updatedByName: getUserDisplayName(fb.updatedBy as any),
+                    updatedByName:
+                        getUserDisplayName(fb.updatedBy as any) ||
+                        getUserDisplayName(fb.processedBy as any) ||
+                        getUserDisplayName(fb.repliedBy as any) ||
+                        '',
                 })),
                 total,
                 page,
-                limit,
+                pageSize,
             },
         };
     } catch (error: any) {
@@ -320,68 +374,14 @@ router.get('/list', authMiddleware, adminMiddleware, async (ctx) => {
  */
 router.get('/:id', authMiddleware, async (ctx) => {
     try {
-        const userId = (ctx as any).state.user.id;
         const currentUser = (ctx as any).state.user;
         const feedbackId = ctx.params.id;
 
-        const feedback = await Feedback.findById(feedbackId).populate(
-            'userId',
-            'name avatar studentId username'
-        );
-
-        if (!feedback) {
-            throw new CustomError(
-                'Feedback not found',
-                ErrorCodes.FEEDBACK_NOT_FOUND
-            );
-        }
-
-        // 权限检查：只能查看自己的反馈（管理员除外）
-        const ownerId =
-            typeof feedback.userId === 'object' && (feedback.userId as any)?._id
-                ? String((feedback.userId as any)._id)
-                : String(feedback.userId || '');
-        if (ownerId !== userId && currentUser?.role !== Roles.ADMIN) {
-            throw new CustomError('Access denied', ErrorCodes.FORBIDDEN);
-        }
-
-        let updatedByName: string | undefined;
-        let updatedByValue: any = feedback.updatedBy;
-        if (feedback.updatedBy) {
-            try {
-                const updatedByUser = await User.findById(feedback.updatedBy)
-                    .select('name username')
-                    .lean();
-                updatedByName = getUserDisplayName(updatedByUser as any);
-                updatedByValue = updatedByUser?._id || feedback.updatedBy;
-            } catch (error) {
-                // ignore audit lookup errors
-            }
-        }
+        const feedback = await getFeedbackDetail(feedbackId, currentUser);
 
         ctx.body = {
             success: true,
-            data: {
-                id: feedback._id,
-                userId: feedback.userId,
-                userName: getUserDisplayName(feedback.userId as any),
-                typeId: feedback.typeId, // 数字类型
-                urgencyId: feedback.urgencyId, // 数字类型
-                title: feedback.title,
-                description: feedback.description,
-                contact: feedback.contact,
-                images: feedback.images,
-                status: feedback.status, // 数字类型
-                reply: feedback.reply,
-                repliedBy: feedback.repliedBy,
-                replyAt: feedback.replyAt,
-                processedReason: feedback.processedReason,
-                comments: feedback.comments || [],
-                createdAt: feedback.createdAt,
-                updatedAt: feedback.updatedAt,
-                updatedBy: updatedByValue,
-                updatedByName,
-            },
+            data: formatRouteDateTimes(feedback, ['date']),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -405,6 +405,7 @@ router.put('/:id', authMiddleware, adminMiddleware, async (ctx) => {
 
         const id = ctx.params.id;
         const { status, reply } = ctx.request.body as any;
+        const replyText = String(reply || '').trim();
 
         const feedback = await Feedback.findById(id);
         if (!feedback)
@@ -416,15 +417,30 @@ router.put('/:id', authMiddleware, adminMiddleware, async (ctx) => {
         const normalizedStatus = normalizeNumericEnum(status);
         if (normalizedStatus !== undefined) {
             feedback.status = normalizedStatus;
-        } else if (reply && feedback.status === FeedbackStatus.PENDING) {
+        } else if (replyText && feedback.status === FeedbackStatus.PENDING) {
             feedback.status = FeedbackStatus.PROCESSING;
         }
-        if (reply) {
-            feedback.reply = reply;
-            feedback.repliedBy = user._id;
+        if (replyText) {
+            feedback.reply = replyText;
+            feedback.repliedBy = user?._id;
             feedback.replyAt = new Date();
-            feedback.processedBy = user._id;
+            appendOfficialFeedbackRecord(feedback, user, replyText);
+        }
+
+        if (
+            normalizedStatus === FeedbackStatus.RESOLVED ||
+            normalizedStatus === FeedbackStatus.REJECTED ||
+            replyText
+        ) {
+            feedback.processedBy = user?._id;
             feedback.processedAt = new Date();
+        }
+
+        if (
+            normalizedStatus === FeedbackStatus.RESOLVED ||
+            normalizedStatus === FeedbackStatus.REJECTED
+        ) {
+            feedback.processedReason = replyText || feedback.processedReason;
         }
 
         Object.assign(feedback, buildUpdatedBy(ctx));
@@ -436,7 +452,10 @@ router.put('/:id', authMiddleware, adminMiddleware, async (ctx) => {
             'name avatar studentId'
         );
 
-        ctx.body = { success: true, data: updated };
+        ctx.body = {
+            success: true,
+            data: formatRouteDateTimes(updated, ['date']),
+        };
     } catch (error: any) {
         if (error.isCustom) throw error;
         console.error('Process feedback failed:', error);
@@ -473,8 +492,9 @@ router.put('/status/:id', authMiddleware, adminMiddleware, async (ctx) => {
         }
         if (reason) {
             feedback.processedReason = reason;
-            feedback.processedBy = user._id;
+            feedback.processedBy = user?._id;
             feedback.processedAt = new Date();
+            appendOfficialFeedbackRecord(feedback, user, reason);
         }
 
         Object.assign(feedback, buildUpdatedBy(ctx));
@@ -507,45 +527,20 @@ router.post('/comment/:id', authMiddleware, async (ctx) => {
 
         const id = ctx.params.id;
         const { content, operator } = ctx.request.body as any;
-        if (!content)
-            throw new CustomError(
-                'Missing required parameters',
-                ErrorCodes.INVALID_PARAMS
-            );
 
-        const feedback = await Feedback.findById(id);
-        if (!feedback)
-            throw new CustomError(
-                'Feedback not found',
-                ErrorCodes.FEEDBACK_NOT_FOUND
-            );
-
-        const opName = operator || user?.name || 'system';
-        const isOfficial = user?.role === Roles.ADMIN;
-
-        const comment = {
-            operator: opName,
+        const result = await addFeedbackComment(
+            id,
             content,
-            date: new Date(),
-            isOfficial,
-        };
-        feedback.comments = feedback.comments || [];
-        feedback.comments.push(comment as any);
-        if (isOfficial && feedback.status === FeedbackStatus.PENDING) {
-            feedback.status = FeedbackStatus.PROCESSING;
-        }
-
-        Object.assign(feedback, buildUpdatedBy(ctx));
-
-        await feedback.save();
+            operator,
+            user,
+            ctx
+        );
 
         ctx.body = {
             success: true,
             data: {
-                commentId:
-                    feedback.comments[feedback.comments.length - 1]._id || null,
-                content,
-                date: comment.date,
+                ...result,
+                date: formatRouteDateTime((result as any)?.date),
             },
         };
     } catch (error: any) {
@@ -565,36 +560,10 @@ router.post('/comment/:id', authMiddleware, async (ctx) => {
  */
 router.delete('/image/:id', authMiddleware, adminMiddleware, async (ctx) => {
     try {
-        const userId = (ctx as any).state.user.id;
-
         const id = ctx.params.id;
         const { url } = ctx.request.body as any;
-        if (!url)
-            throw new CustomError('Missing url', ErrorCodes.INVALID_PARAMS);
 
-        const feedback = await Feedback.findById(id);
-        if (!feedback)
-            throw new CustomError(
-                'Feedback not found',
-                ErrorCodes.FEEDBACK_NOT_FOUND
-            );
-
-        feedback.images = (feedback.images || []).filter((u) => u !== url);
-        Object.assign(feedback, buildUpdatedBy(ctx));
-        await feedback.save();
-
-        // 不要立即删除文件或元数据：仅解除该 Upload 与反馈的关联（清空 refType/refId），
-        // 由管理员在上传管理页面统一确认并删除实际文件，避免误删未确认的图片。
-        try {
-            const uploadDoc = await Upload.findOne({ url });
-            if (uploadDoc) {
-                uploadDoc.refType = undefined;
-                uploadDoc.refId = undefined;
-                await uploadDoc.save();
-            }
-        } catch (e) {
-            console.error('Failed to update upload doc', e);
-        }
+        await removeFeedbackImage(id, url, ctx);
 
         ctx.body = { success: true };
     } catch (error: any) {
@@ -614,66 +583,15 @@ router.delete('/image/:id', authMiddleware, adminMiddleware, async (ctx) => {
  */
 router.get('/export', authMiddleware, adminMiddleware, async (ctx) => {
     try {
-        const format = (ctx.query.format as string) || 'csv';
         const status = ctx.query.status as string | undefined;
         const startDate = ctx.query.startDate as string | undefined;
         const endDate = ctx.query.endDate as string | undefined;
 
-        const filter: any = {};
-        if (status) filter.status = status;
-        if (startDate || endDate) filter.createdAt = {};
-        if (startDate) filter.createdAt.$gte = new Date(startDate);
-        if (endDate) filter.createdAt.$lte = new Date(endDate);
-
-        const feedbacks = await Feedback.find(filter)
-            .populate('userId', 'name studentId avatar username')
-            .sort({ createdAt: -1 });
-
-        // Build CSV
-        const headers = [
-            'id',
-            'type',
-            'title',
-            'description',
-            'contact',
-            'urgency',
-            'status',
-            'userId',
-            'userName',
-            'studentId',
-            'createdAt',
-        ];
-        const rows = feedbacks.map((fb) => [
-            fb._id.toString(),
-            fb.typeName || fb.typeId,
-            (fb.title || '').replace(/\n/g, ' '),
-            (fb.description || '').replace(/\n/g, ' '),
-            fb.contact || '',
-            fb.urgencyName || fb.urgencyId || '',
-            fb.status,
-            fb.userId?._id?.toString() || '',
-            getUserDisplayName(fb.userId as any) || '',
-            fb.userId?.studentId || '',
-            fb.createdAt ? fb.createdAt.toISOString() : '',
-        ]);
-
-        const escapeCsv = (val: any) => {
-            if (val == null) return '';
-            const s = String(val);
-            if (s.includes(',') || s.includes('\n') || s.includes('"')) {
-                return '"' + s.replace(/"/g, '""') + '"';
-            }
-            return s;
-        };
-
-        const csv = [
-            headers.join(','),
-            ...rows.map((r) => r.map(escapeCsv).join(',')),
-        ].join('\n');
-
+        const csv = await exportFeedbacks(status, startDate, endDate);
         const filename = `feedbacks_${new Date()
             .toISOString()
             .slice(0, 10)}.csv`;
+
         ctx.set('Content-disposition', `attachment; filename="${filename}"`);
         ctx.set('Content-Type', 'text/csv; charset=utf-8');
         ctx.body = csv;

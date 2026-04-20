@@ -1,7 +1,18 @@
 import assert from 'node:assert';
-import { releaseBookingTimeSlot, buildRenewBookingData, expireBookingIfNeeded, markAllExpiredBookings, performBookingCheckin, performBookingCheckout, performBookingRenew } from '../src/routes/booking';
+import {
+  releaseBookingTimeSlot,
+  buildRenewBookingData,
+  expireBookingIfNeeded,
+  markAllExpiredBookings,
+  performBookingCheckin,
+  performBookingCheckout,
+  performBookingRenew,
+  validateBookingRequest,
+  checkBookingPermissions,
+} from '../src/routes/booking';
 import { TimeSlotStatus, Booking } from '../src/models/mysql';
 import { TimeSlotStatusValue, BookingStatus } from '../src/models/mysql/types';
+import { User, CreditRecord } from '../src/models/mongodb';
 
 type UpdateCall = {
   values: any;
@@ -11,6 +22,8 @@ type UpdateCall = {
 export async function runTests() {
   await testReleaseBookingTimeSlot();
   await testReleaseBookingTimeSlotWithTransaction();
+  testValidateBookingRequest();
+  await testCheckBookingPermissions();
   await testExpireBookingIfNeededPastDate();
   await testMarkAllExpiredBookings();
   await testPerformBookingCheckin();
@@ -18,6 +31,7 @@ export async function runTests() {
   await testPerformBookingCheckoutOverdue();
   await testPerformBookingRenew();
   await testPerformBookingRenewConflict();
+  await testPerformBookingRenewLimitExceeded();
   await testBuildRenewBookingDataForAfternoon();
 }
 
@@ -182,9 +196,24 @@ async function testPerformBookingCheckout() {
   };
   const fakeExpire = async () => false;
 
-  await performBookingCheckout(booking as any, 'operator456', fakeRelease as any, fakeExpire as any);
-  assert.strictEqual(booking.status, BookingStatus.COMPLETED);
-  assert.strictEqual(releaseCount, 1);
+  const originalFindById = (User as any).findById;
+  const originalCreditRecordCreate = (CreditRecord as any).create;
+  (User as any).findById = async () => ({
+    creditScore: 80,
+    save: async function () {
+      return this;
+    },
+  });
+  (CreditRecord as any).create = async (payload: any) => payload;
+
+  try {
+    await performBookingCheckout(booking as any, 'operator456', fakeRelease as any, fakeExpire as any);
+    assert.strictEqual(booking.status, BookingStatus.COMPLETED);
+    assert.strictEqual(releaseCount, 1);
+  } finally {
+    (User as any).findById = originalFindById;
+    (CreditRecord as any).create = originalCreditRecordCreate;
+  }
 }
 
 async function testPerformBookingCheckoutOverdue() {
@@ -239,17 +268,14 @@ async function testPerformBookingRenew() {
     },
   };
 
-  let releaseCalled = 0;
   let upsertCalled = 0;
-  const fakeBookingModel = {
-    create: async (data: any, _options: any) => ({ ...data, id: 999 }),
-  };
   const fakeTimeSlotStatusModel = {
-    findOne: async () => null,
-    upsert: async () => { upsertCalled += 1; },
+    findAll: async () => [],
+    upsert: async () => {
+      upsertCalled += 1;
+    },
   };
   const fakeTransactionProvider = async (callback: any) => callback({} as any);
-  const fakeRelease = async () => { releaseCalled += 1; };
 
   const newBooking = await performBookingRenew(
     booking as any,
@@ -262,19 +288,17 @@ async function testPerformBookingRenew() {
         startTime: '13:00',
         endTime: '17:00',
       }),
-      bookingModel: fakeBookingModel as any,
       timeSlotStatusModel: fakeTimeSlotStatusModel as any,
       transactionProvider: fakeTransactionProvider,
-      releaseFn: fakeRelease,
       buildAuditFieldsFn: () => ({}),
       buildUpdatedByFn: () => ({}),
     }
   );
 
-  assert.strictEqual(booking.status, BookingStatus.CANCELED);
-  assert.strictEqual(releaseCalled, 1);
+  assert.strictEqual(booking.status, BookingStatus.UPCOMING);
   assert.strictEqual(upsertCalled, 1);
-  assert.strictEqual(newBooking.id, 999);
+  assert.strictEqual(newBooking.id, booking.id);
+  assert.strictEqual(newBooking.endTime, '17:00');
 }
 
 async function testPerformBookingRenewConflict() {
@@ -292,12 +316,16 @@ async function testPerformBookingRenewConflict() {
     },
   };
 
-  const fakeBookingModel = {
-    create: async (data: any, _options: any) => ({ ...data, id: 1000 }),
-  };
   const fakeTimeSlotStatusModel = {
-    findOne: async () => ({ status: TimeSlotStatusValue.BOOKED }),
-    upsert: async () => { throw new Error('upsert should not be called'); },
+    findAll: async () => [
+      {
+        status: TimeSlotStatusValue.BOOKED,
+        bookingId: 'other-booking',
+      },
+    ],
+    upsert: async () => {
+      throw new Error('upsert should not be called');
+    },
   };
   const fakeTransactionProvider = async (callback: any) => callback({} as any);
 
@@ -314,10 +342,8 @@ async function testPerformBookingRenewConflict() {
             startTime: '13:00',
             endTime: '17:00',
           }),
-          bookingModel: fakeBookingModel as any,
           timeSlotStatusModel: fakeTimeSlotStatusModel as any,
           transactionProvider: fakeTransactionProvider,
-          releaseFn: async () => {},
           buildAuditFieldsFn: () => ({}),
           buildUpdatedByFn: () => ({}),
         }
@@ -325,6 +351,57 @@ async function testPerformBookingRenewConflict() {
     },
     {
       message: 'This time slot has been booked',
+    }
+  );
+}
+
+async function testPerformBookingRenewLimitExceeded() {
+  const futureDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const booking = {
+    id: 7,
+    userId: 'user888',
+    seatId: 202,
+    status: BookingStatus.UPCOMING,
+    date: futureDate,
+    timeSlot: 0,
+    update: async function (values: any) {
+      Object.assign(this, values);
+      return this;
+    },
+  };
+
+  const fakeTimeSlotStatusModel = {
+    findAll: async () => [
+      { bookingId: 7 },
+      { bookingId: 7 },
+    ],
+    upsert: async () => {
+      throw new Error('upsert should not be called');
+    },
+  };
+  const fakeTransactionProvider = async (callback: any) => callback({} as any);
+
+  await assert.rejects(
+    async () => {
+      await performBookingRenew(
+        booking as any,
+        1,
+        {} as any,
+        {
+          resolveTimeSlot: async () => 1,
+          validateBookingTimeRange: async () => ({
+            isCustomTime: false,
+            startTime: '13:00',
+            endTime: '17:00',
+          }),
+          timeSlotStatusModel: fakeTimeSlotStatusModel as any,
+          transactionProvider: fakeTransactionProvider,
+          buildUpdatedByFn: () => ({}),
+        }
+      );
+    },
+    {
+      message: 'Renewal limit exceeded',
     }
   );
 }
@@ -338,4 +415,95 @@ async function testBuildRenewBookingDataForAfternoon() {
   assert.strictEqual(renewalData.startTime, '13:00');
   assert.strictEqual(renewalData.endTime, '17:00');
   assert.strictEqual(renewalData.date.toISOString().split('T')[0], futureDate);
+}
+
+function testValidateBookingRequest() {
+  const valid = validateBookingRequest({
+    seatId: '12',
+    date: '2026-04-20',
+    timeSlot: 'morning',
+    startTime: '08:30',
+    endTime: '09:30',
+  });
+
+  assert.strictEqual(valid.seatId, 12);
+  assert.strictEqual(valid.date, '2026-04-20');
+  assert.strictEqual(valid.timeSlot, 'morning');
+  assert.strictEqual(valid.startTime, '08:30');
+  assert.strictEqual(valid.endTime, '09:30');
+
+  assert.throws(
+    () => validateBookingRequest({ seatId: 1, date: '2026-04-20' } as any),
+    { message: 'Missing required parameters' }
+  );
+
+  assert.throws(
+    () =>
+      validateBookingRequest({
+        seatId: 'bad-seat-id',
+        date: '2026-04-20',
+        timeSlot: 0,
+      }),
+    { message: 'Invalid seatId' }
+  );
+
+  assert.throws(
+    () => validateBookingRequest({ seatId: 1, date: 'invalid-date', timeSlot: 0 }),
+    { message: 'Invalid date' }
+  );
+}
+
+async function testCheckBookingPermissions() {
+  const validUserModel = {
+    findById: async (id: string) => ({
+      _id: id,
+      studentId: '20260001',
+      creditScore: 85,
+      blacklisted: false,
+    }),
+  };
+
+  const result = await checkBookingPermissions('user1', {
+    requireStudentId: true,
+    minCreditScore: 60,
+    userModel: validUserModel as any,
+  });
+  assert.strictEqual(result.studentId, '20260001');
+  assert.strictEqual(result.creditScore, 85);
+
+  await assert.rejects(
+    async () =>
+      checkBookingPermissions('user2', {
+        requireStudentId: true,
+        userModel: {
+          findById: async () => ({
+            _id: 'user2',
+            studentId: '',
+            creditScore: 90,
+            blacklisted: false,
+          }),
+        } as any,
+      }),
+    {
+      message: 'Please bind your student ID before booking',
+    }
+  );
+
+  await assert.rejects(
+    async () =>
+      checkBookingPermissions('user3', {
+        minCreditScore: 80,
+        userModel: {
+          findById: async () => ({
+            _id: 'user3',
+            studentId: '20260003',
+            creditScore: 70,
+            blacklisted: false,
+          }),
+        } as any,
+      }),
+    {
+      message: 'Insufficient credit score for booking',
+    }
+  );
 }

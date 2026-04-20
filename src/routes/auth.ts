@@ -185,7 +185,7 @@ router.post('/wxlogin', async (ctx) => {
                 openid: session.openid,
                 password: await bcrypt.hash(session.openid, 10),
                 avatar: userInfo?.avatarUrl,
-                name: '',
+                name: userInfo?.nickName || '',
                 role: Roles.USER,
                 creditScore: 100,
                 studentId: null,
@@ -204,11 +204,12 @@ router.post('/wxlogin', async (ctx) => {
                 user.username = generatedUsername;
                 needUpdate = true;
             }
-            if (
-                userInfo?.avatarUrl &&
-                (!user.avatar || user.avatar === userInfo.avatarUrl)
-            ) {
+            if (userInfo?.avatarUrl && user.avatar !== userInfo.avatarUrl) {
                 user.avatar = userInfo.avatarUrl;
+                needUpdate = true;
+            }
+            if (userInfo?.nickName && user.name !== userInfo.nickName) {
+                user.name = userInfo.nickName;
                 needUpdate = true;
             }
             if (needUpdate) {

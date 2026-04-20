@@ -89,21 +89,21 @@ mysql -u root -p < database/init-production.sql
 \`\`\`
 
 #### MongoDB 数据库初始化
-MongoDB 会在首次写入数据时自动创建数据库和集合。如需手动初始化（包含测试数据）：
+MongoDB 会在首次写入数据时自动创建数据库和集合。如需手动初始化（最小化模式）：
 
 \`\`\`bash
 # 初始化所有环境的 MongoDB 数据库
 pnpm db:mongo:init
 
 # 或手动执行脚本
-node database/init-mongodb.js
+node tools/init-mongodb.js
 \`\`\`
 
 **初始化内容：**
-- ✅ **开发环境** (library_booking_dev): 包含测试用户、活动、通知等数据
-- ✅ **测试环境** (library_booking_test): 包含测试用户、活动、通知等数据
-- ✅ **UAT 环境** (library_booking_uat): 仅创建集合结构，无测试数据
-- ✅ **生产环境** (library_booking): 仅创建集合结构，无测试数据
+- ✅ **开发环境** (library_booking_dev): 创建集合并确保默认超级管理员
+- ✅ **测试环境** (library_booking_test): 创建集合并确保默认超级管理员
+- ✅ **UAT 环境** (library_booking_uat): 仅保留默认超级管理员
+- ✅ **生产环境** (library_booking): 仅保留默认超级管理员
 
 **初始化的集合：**
 - \`users\` - 用户信息

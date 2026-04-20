@@ -40,6 +40,8 @@ export interface IUser extends Document {
         activity: mongoose.Types.ObjectId;
         registeredAt: Date;
     }>;
+    createdBy?: mongoose.Types.ObjectId;
+    updatedBy?: mongoose.Types.ObjectId;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -54,6 +56,8 @@ const userSchema = new Schema<IUser>(
         studentId: { type: String, unique: true, sparse: true },
         name: String,
         avatar: String,
+        createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+        updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         role: { type: Number, enum: [0, 1], default: 0 },
         isSuperAdmin: { type: Boolean, default: false },
         creditScore: { type: Number, default: 100 },

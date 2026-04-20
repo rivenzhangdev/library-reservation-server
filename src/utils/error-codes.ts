@@ -92,6 +92,31 @@ export const ErrorCodes = {
     FEEDBACK_NOT_FOUND: 8001, // 反馈不存在
     GET_FEEDBACKS_ERROR: 8002, // 获取反馈列表失败
     SUBMIT_FEEDBACK_ERROR: 8003, // 提交反馈失败
+
+    // ==================== 变更申请错误 (5200-5299) ====================
+    CHANGE_REQUEST_NOT_FOUND: 5201, // 申请不存在
+    CHANGE_REQUEST_ALREADY_REVIEWED: 5202, // 申请已审批
+    CHANGE_REQUEST_DUPLICATE: 5203, // 重复提交
+    CHANGE_REQUEST_TARGET_UNAVAILABLE: 5204, // 目标时段/座位不可用
+
+    // ==================== 预约续约错误 (5300-5399) ====================
+    RENEWAL_LIMIT_EXCEEDED: 5301, // 续约次数已达上限
+    RENEWAL_SLOT_UNAVAILABLE: 5302, // 续约目标时段不可用
+    BOOKING_DAILY_LIMIT_EXCEEDED: 5303, // 每日预约次数已达上限
+
+    ACTIVITY_REGISTRATION_CLOSED: 7103, // 报名已截止
+
+    // ==================== 审计日志错误 (9000-9099) ====================
+    AUDIT_LOG_ERROR: 9001, // 审计日志写入失败
+    AUDIT_LOG_QUERY_ERROR: 9002, // 审计日志查询失败
+
+    // ==================== 预约规则配置错误 (5400-5499) ====================
+    BOOKING_RULE_NOT_FOUND: 5401, // 规则不存在
+    BOOKING_RULE_UPDATE_ERROR: 5402, // 规则更新失败
+    BOOKING_RULE_INVALID_VALUE: 5403, // 规则值格式错误
+
+    // ==================== 运营看板错误 (9100-9199) ====================
+    DASHBOARD_STATS_ERROR: 9101, // 获取看板数据失败
 } as const;
 
 export type ErrorCodeValue = (typeof ErrorCodes)[keyof typeof ErrorCodes];

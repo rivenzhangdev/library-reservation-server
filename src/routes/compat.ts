@@ -24,6 +24,7 @@ import { buildAuditFields, buildUpdatedBy } from '../utils/audit';
 import { normalizeUploadUrl, saveBase64Image } from '../utils/upload';
 import { compareFloorName } from '../utils/floor-order';
 import { normalizeSeatStatus } from '../utils/seat-status';
+import { formatRouteDateTimes } from '../utils/route-time-serializer';
 import {
     normalizeNumericEnum,
     normalizeSeatType,
@@ -40,11 +41,17 @@ import {
     parseLocalDate,
     validateBookingTimeRange,
 } from '../utils/booking-rules';
+import { getCreditRuleValues } from '../utils/credit-rule-config';
 
 const router = new Router({ prefix: '/api' });
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'default_secret';
 import { Roles } from '../constants/roles';
+import {
+    SystemDisplayName,
+    ViolationRecordType,
+    CreditReasons,
+} from '../constants/credit';
 
 function requireAdmin(ctx: any) {
     const user = ctx.state.user;
@@ -99,9 +106,10 @@ function assertNotProtectedSuperAdmin(user: any) {
     }
 }
 
-const VIOLATION_DEDUCT_POINTS = Number(
-    process.env.VIOLATION_DEDUCT_POINTS || 5
-);
+async function getPersistedViolationDeductPoints() {
+    const { violationDeductPoints } = await getCreditRuleValues();
+    return violationDeductPoints;
+}
 
 function getDisplayName(value: any, userMap: Record<string, any>) {
     if (!value) return undefined;
@@ -115,6 +123,13 @@ function getDisplayName(value: any, userMap: Record<string, any>) {
     }
     const id = String(value);
     return userMap[id]?.username || userMap[id]?.name || undefined;
+}
+
+function toLocalDateOnly(value: Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
 }
 
 // ---- Bookings compatibility (admin expects /api/bookings) ----
@@ -268,7 +283,7 @@ router.get('/bookings', authMiddleware, async (ctx) => {
             const seatName = seat?.name
                 ? String(seat.name)
                 : `R${seat?.rowNum || 0}C${seat?.colNum || 0}`;
-            return {
+            return formatRouteDateTimes({
                 id: booking.id,
                 seatId: booking.seatId,
                 seatName,
@@ -296,7 +311,7 @@ router.get('/bookings', authMiddleware, async (ctx) => {
                     ? userMap[updatedById]?.username ||
                       userMap[updatedById]?.name
                     : undefined,
-            };
+            });
         });
 
         ctx.body = {
@@ -305,7 +320,7 @@ router.get('/bookings', authMiddleware, async (ctx) => {
                 list: bookings,
                 total: count,
                 page: pageNum,
-                limit: pageLimit,
+                pageSize: pageLimit,
             },
         };
     } catch (error: any) {
@@ -381,7 +396,7 @@ router.get('/bookings/:id', authMiddleware, async (ctx) => {
             : `R${seat?.rowNum ?? 0}C${seat?.colNum ?? 0}`;
         ctx.body = {
             success: true,
-            data: {
+            data: formatRouteDateTimes({
                 id: booking.id,
                 seatId: booking.seatId,
                 seatName,
@@ -410,7 +425,7 @@ router.get('/bookings/:id', authMiddleware, async (ctx) => {
                 updatedByName: updatedById
                     ? uMap[updatedById]?.username || uMap[updatedById]?.name
                     : undefined,
-            },
+            }),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -1049,7 +1064,12 @@ router.get('/floors', authMiddleware, async (ctx) => {
 
         ctx.body = {
             success: true,
-            data: { list: mapped, total: mapped.length },
+            data: {
+                list: mapped,
+                total: mapped.length,
+                page: 1,
+                pageSize: mapped.length,
+            },
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -1294,16 +1314,24 @@ router.get('/activity/list', authMiddleware, async (ctx) => {
         const mapped = (pagedActivities || []).map((a: any) => {
             const createdById = toAuditId(a.createdBy);
             const updatedById = toAuditId(a.updatedBy);
-            return {
+            return formatRouteDateTimes({
                 ...a,
                 createdBy: createdById,
                 createdByName: getDisplayName(a.createdBy, userMap),
                 updatedBy: updatedById,
                 updatedByName: getDisplayName(a.updatedBy, userMap),
-            };
+            });
         });
 
-        ctx.body = { success: true, data: { list: mapped, total } };
+        ctx.body = {
+            success: true,
+            data: {
+                list: mapped,
+                total,
+                page: pageNum,
+                pageSize: pageLimit,
+            },
+        };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError(
@@ -1392,17 +1420,35 @@ router.get('/user/list', authMiddleware, async (ctx) => {
         ];
         const total = await User.countDocuments(filter);
         let list = await User.find(filter)
+            .populate('createdBy', 'name username')
+            .populate('updatedBy', 'name username')
             .skip((pageNum - 1) * pageLimit)
             .limit(pageLimit)
             .lean();
 
-        list = (list || []).map((u: any) => ({
-            ...u,
-            isSuperAdmin: undefined,
-            avatar: normalizeUploadUrl(String(u.avatar || ''), ctx.origin),
-        }));
+        list = (list || []).map((u: any) =>
+            formatRouteDateTimes({
+                ...u,
+                isSuperAdmin: undefined,
+                avatar: normalizeUploadUrl(String(u.avatar || ''), ctx.origin),
+                createdBy: u.createdBy?._id || u.createdBy,
+                createdByName:
+                    u.createdBy?.username || u.createdBy?.name || undefined,
+                updatedBy: u.updatedBy?._id || u.updatedBy,
+                updatedByName:
+                    u.updatedBy?.username || u.updatedBy?.name || undefined,
+            })
+        );
 
-        ctx.body = { success: true, data: { list, total } };
+        ctx.body = {
+            success: true,
+            data: {
+                list,
+                total,
+                page: pageNum,
+                pageSize: pageLimit,
+            },
+        };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError(
@@ -1415,7 +1461,11 @@ router.get('/user/list', authMiddleware, async (ctx) => {
 router.get('/user/:id', authMiddleware, async (ctx) => {
     try {
         const id = ctx.params.id;
-        const user = await User.findById(id).select('-password').lean();
+        const user: any = await User.findById(id)
+            .select('-password')
+            .populate('createdBy', 'name username')
+            .populate('updatedBy', 'name username')
+            .lean();
         if (!user)
             throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
         if (user.isSuperAdmin && String(ctx.state.user.id) !== String(id)) {
@@ -1423,6 +1473,14 @@ router.get('/user/:id', authMiddleware, async (ctx) => {
         }
         delete user.isSuperAdmin;
         user.avatar = normalizeUploadUrl(String(user.avatar || ''), ctx.origin);
+        const createdByName =
+            user.createdBy?.username || user.createdBy?.name || undefined;
+        const updatedByName =
+            user.updatedBy?.username || user.updatedBy?.name || undefined;
+        user.createdBy = user.createdBy?._id || user.createdBy;
+        user.updatedBy = user.updatedBy?._id || user.updatedBy;
+        user.createdByName = createdByName;
+        user.updatedByName = updatedByName;
         ctx.body = { success: true, data: user };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -1435,6 +1493,7 @@ router.post('/user', authMiddleware, async (ctx) => {
         requireAdmin(ctx);
         const data = ctx.request.body as any;
         delete data.isSuperAdmin;
+        Object.assign(data, buildAuditFields(ctx));
         if (data.password) {
             // hash password
             // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1508,6 +1567,7 @@ router.put('/user/:id', authMiddleware, async (ctx) => {
         if (data.isSuperAdmin !== undefined) {
             delete data.isSuperAdmin;
         }
+        Object.assign(data, buildUpdatedBy(ctx));
         if (data.password) {
             const bcrypt = require('bcryptjs');
             data.password = await bcrypt.hash(data.password, 10);
@@ -1597,6 +1657,7 @@ router.put('/user/status/:id', authMiddleware, async (ctx) => {
             update.blacklisted = false;
             update.blacklistReason = undefined;
         }
+        Object.assign(update, buildUpdatedBy(ctx));
         const user = await User.findByIdAndUpdate(id, update, {
             new: true,
         }).select('-password');
@@ -1631,6 +1692,7 @@ router.put('/user/batch/status', authMiddleware, async (ctx) => {
         }
         const update: any = {};
         update.blacklisted = normalizeBooleanFlag(status);
+        Object.assign(update, buildUpdatedBy(ctx));
         await User.updateMany({ _id: { $in: userIds } }, { $set: update });
         ctx.body = { success: true };
     } catch (error: any) {
@@ -1659,17 +1721,28 @@ router.get('/zones', authMiddleware, async (ctx) => {
             .limit(pageLimit)
             .lean();
 
-        const mapped = (list || []).map((z: any) => ({
-            ...z,
-            createdBy: z.createdBy?._id || z.createdBy,
-            createdByName:
-                z.createdBy?.username || z.createdBy?.name || undefined,
-            updatedBy: z.updatedBy?._id || z.updatedBy,
-            updatedByName:
-                z.updatedBy?.username || z.updatedBy?.name || undefined,
-        }));
+        const mapped = (list || []).map((z: any) =>
+            formatRouteDateTimes({
+                ...z,
+                id: String(z._id),
+                createdBy: z.createdBy?._id || z.createdBy,
+                createdByName:
+                    z.createdBy?.username || z.createdBy?.name || undefined,
+                updatedBy: z.updatedBy?._id || z.updatedBy,
+                updatedByName:
+                    z.updatedBy?.username || z.updatedBy?.name || undefined,
+            })
+        );
 
-        ctx.body = { success: true, data: { list: mapped, total } };
+        ctx.body = {
+            success: true,
+            data: {
+                list: mapped,
+                total,
+                page: pageNum,
+                pageSize: pageLimit,
+            },
+        };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError('Failed to get zones', ErrorCodes.INTERNAL_ERROR);
@@ -1958,7 +2031,10 @@ router.post('/notification', authMiddleware, async (ctx) => {
                 : undefined,
         };
 
-        ctx.body = { success: true, data: resp };
+        ctx.body = {
+            success: true,
+            data: formatRouteDateTimes(resp, ['time']),
+        };
     } catch (error: any) {
         if (error.isCustom) throw error;
         console.error('[Notification Create Error]', error.message || error);
@@ -2190,7 +2266,7 @@ router.post('/bookings', authMiddleware, async (ctx) => {
                 : undefined,
         };
 
-        ctx.body = { success: true, data: resp };
+        ctx.body = { success: true, data: formatRouteDateTimes(resp) };
     } catch (error: any) {
         if (error.isCustom) throw error;
         console.error('[Booking Create Error]', error.message || error);
@@ -2580,7 +2656,7 @@ router.post('/credit/add', authMiddleware, async (ctx) => {
             userId,
             type: 0,
             points: pointValue,
-            reason: reason || '管理员加分',
+            reason: reason || CreditReasons.ADMIN_ADD,
             updatedBy: currentUserId,
         });
         ctx.body = {
@@ -2593,6 +2669,8 @@ router.post('/credit/add', authMiddleware, async (ctx) => {
                     type: creditRecord.type,
                     points: creditRecord.points,
                     reason: creditRecord.reason,
+                    reasonCode: creditRecord.reasonCode || creditRecord.reason,
+                    reasonText: creditRecord.reasonText || creditRecord.reason,
                     date: creditRecord.date,
                     updatedBy: creditRecord.updatedBy,
                 },
@@ -2624,7 +2702,7 @@ router.post('/credit/deduct', authMiddleware, async (ctx) => {
             userId,
             type: 1,
             points: Number(points),
-            reason: reason || '管理员扣分',
+            reason: reason || CreditReasons.ADMIN_DEDUCT,
             updatedBy: currentUserId,
         });
         ctx.body = {
@@ -2637,6 +2715,8 @@ router.post('/credit/deduct', authMiddleware, async (ctx) => {
                     type: creditRecord.type,
                     points: creditRecord.points,
                     reason: creditRecord.reason,
+                    reasonCode: creditRecord.reasonCode || creditRecord.reason,
+                    reasonText: creditRecord.reasonText || creditRecord.reason,
                     date: creditRecord.date,
                     updatedBy: creditRecord.updatedBy,
                 },
@@ -2674,10 +2754,36 @@ router.get('/credit/blacklist', authMiddleware, async (ctx) => {
         requireAdmin(ctx);
         const { pageNum, pageLimit } = parsePagination(ctx.query);
         const users = await User.find({ blacklisted: true })
+            .select('-password')
+            .populate('createdBy', 'name username')
+            .populate('updatedBy', 'name username')
             .skip((pageNum - 1) * pageLimit)
-            .limit(pageLimit);
+            .limit(pageLimit)
+            .lean();
         const total = await User.countDocuments({ blacklisted: true });
-        ctx.body = { success: true, data: { list: users, total } };
+
+        const list = (users || []).map((u: any) =>
+            formatRouteDateTimes({
+                ...u,
+                avatar: normalizeUploadUrl(String(u.avatar || ''), ctx.origin),
+                createdBy: u.createdBy?._id || u.createdBy,
+                createdByName:
+                    u.createdBy?.username || u.createdBy?.name || undefined,
+                updatedBy: u.updatedBy?._id || u.updatedBy,
+                updatedByName:
+                    u.updatedBy?.username || u.updatedBy?.name || undefined,
+            })
+        );
+
+        ctx.body = {
+            success: true,
+            data: {
+                list,
+                total,
+                page: pageNum,
+                pageSize: pageLimit,
+            },
+        };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError(
@@ -2697,14 +2803,11 @@ router.get('/dashboard/stats', authMiddleware, async (ctx) => {
 
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
-
-        const { Op } = require('sequelize');
+        const todayStr = toLocalDateOnly(today);
 
         const todayBookings = await Booking.count({
             where: {
-                date: { [Op.between]: [today, tomorrow] },
+                date: todayStr,
                 status: {
                     [Op.in]: [BookingStatus.UPCOMING, BookingStatus.ONGOING],
                 },
@@ -2752,16 +2855,13 @@ router.get('/dashboard', authMiddleware, async (ctx) => {
         const totalSeats = await Seat.count();
         const maintenanceSeats = await Seat.count({ where: { status: 1 } });
         const availableSeats = totalSeats - maintenanceSeats;
-        const { Op } = require('sequelize');
-
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
+        const todayStr = toLocalDateOnly(today);
 
         const todayBookings = await Booking.count({
             where: {
-                date: { [Op.between]: [today, tomorrow] },
+                date: todayStr,
                 status: {
                     [Op.in]: [BookingStatus.UPCOMING, BookingStatus.ONGOING],
                 },
@@ -2810,8 +2910,7 @@ router.get('/statistics', authMiddleware, async (ctx) => {
         const range = String(ctx.query.range || 'week');
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
+        const todayStr = toLocalDateOnly(today);
 
         let rangeStart = new Date(today);
         let trendDays = 7;
@@ -2830,19 +2929,20 @@ router.get('/statistics', authMiddleware, async (ctx) => {
         for (let i = trendDays - 1; i >= 0; i--) {
             const d = new Date(today);
             d.setDate(d.getDate() - i);
-            const next = new Date(d);
-            next.setDate(next.getDate() + 1);
+            const dateStr = toLocalDateOnly(d);
             const count = await Booking.count({
-                where: { date: { [Op.between]: [d, next] } },
+                where: { date: dateStr },
             });
             trendData.push({
-                date: d.toISOString().split('T')[0],
+                date: dateStr,
                 bookings: count,
             });
         }
 
+        const rangeStartStr = toLocalDateOnly(rangeStart);
+
         const rangeBookings = await Booking.count({
-            where: { date: { [Op.between]: [rangeStart, tomorrow] } },
+            where: { date: { [Op.between]: [rangeStartStr, todayStr] } },
         });
 
         const totalBookings = await Booking.count();
@@ -2890,7 +2990,11 @@ router.get('/user/credit/records', authMiddleware, async (ctx) => {
             }
         }
         if (reason) {
-            query.reason = { $regex: reason, $options: 'i' };
+            query.$or = [
+                { reason: { $regex: reason, $options: 'i' } },
+                { reasonCode: { $regex: reason, $options: 'i' } },
+                { reasonText: { $regex: reason, $options: 'i' } },
+            ];
         }
 
         let userSearchIds: string[] | undefined;
@@ -2958,18 +3062,20 @@ router.get('/user/credit/records', authMiddleware, async (ctx) => {
             points: r.points,
             date: r.date || r.createdAt,
             reason: r.reason,
+            reasonCode: r.reasonCode || r.reason,
+            reasonText: r.reasonText || r.reason,
             updatedBy: r.updatedBy?._id || r.updatedBy,
             updatedByName:
                 r.updatedBy?.name ||
                 r.updatedBy?.username ||
                 userMap[String(r.updatedBy)]?.name ||
                 userMap[String(r.updatedBy)]?.username ||
-                '',
+                SystemDisplayName,
         }));
 
         ctx.body = {
             success: true,
-            data: { list, total, page: pageNum, limit: pageLimit },
+            data: { list, total, page: pageNum, pageSize: pageLimit },
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -3041,7 +3147,7 @@ router.get('/violation/list', authMiddleware, async (ctx) => {
                         list: [],
                         total: 0,
                         page: pageNum,
-                        limit: pageLimit,
+                        pageSize: pageLimit,
                     },
                 };
                 return;
@@ -3075,10 +3181,11 @@ router.get('/violation/list', authMiddleware, async (ctx) => {
             userMap[String(u._id)] = u;
         });
 
+        const violationDeductPoints = await getPersistedViolationDeductPoints();
         const list = await Promise.all(
             rows.map(async (b: any) => {
                 const user = userMap[String(b.userId)];
-                return {
+                return formatRouteDateTimes({
                     id: b.id,
                     bookingId: b.id,
                     userId: b.userId,
@@ -3096,26 +3203,25 @@ router.get('/violation/list', authMiddleware, async (ctx) => {
                     floorId: b.seat?.floorId,
                     date: b.date,
                     timeSlot: b.timeSlot,
-                    type: 'Violation',
+                    type: ViolationRecordType.VIOLATION,
                     description: b.seat
                         ? `R${b.seat.rowNum}C${b.seat.colNum}`
                         : '',
-                    points: VIOLATION_DEDUCT_POINTS,
+                    points: violationDeductPoints,
                     status: 'violated',
                     createdAt: b.created_at,
                     updatedAt: b.updated_at,
                     updatedBy: (b as any).updatedBy,
-                    updatedByName: getDisplayName(
-                        (b as any).updatedBy,
-                        userMap
-                    ),
-                };
+                    updatedByName:
+                        getDisplayName((b as any).updatedBy, userMap) ||
+                        SystemDisplayName,
+                });
             })
         );
 
         ctx.body = {
             success: true,
-            data: { list, total: count, page: pageNum, limit: pageLimit },
+            data: { list, total: count, page: pageNum, pageSize: pageLimit },
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -3153,11 +3259,9 @@ router.get('/dashboard/floors', authMiddleware, async (ctx) => {
         const floors = (await Floor.findAll()).sort((a, b) =>
             compareFloorName(a.name, b.name)
         );
-        const { Op } = require('sequelize');
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
+        const todayStr = toLocalDateOnly(today);
 
         const floorData = await Promise.all(
             floors.map(async (floor: any) => {
@@ -3171,7 +3275,7 @@ router.get('/dashboard/floors', authMiddleware, async (ctx) => {
                 // Today's bookings on this floor
                 const todayBooked = await Booking.count({
                     where: {
-                        date: { [Op.between]: [today, tomorrow] },
+                        date: todayStr,
                         status: {
                             [Op.in]: [
                                 BookingStatus.UPCOMING,
@@ -3311,7 +3415,10 @@ router.get('/dashboard/active-users', authMiddleware, async (ctx) => {
                     bookings: parseInt(r.bookingCount || '0'),
                     lastActive,
                     avatar:
-                        user?.avatar ||
+                        normalizeUploadUrl(
+                            String(user?.avatar || ''),
+                            ctx.origin
+                        ) ||
                         `https://api.dicebear.com/7.x/miniavs/svg?seed=${r.userId}`,
                 };
             })
@@ -3330,11 +3437,9 @@ router.get('/dashboard/active-users', authMiddleware, async (ctx) => {
 router.get('/dashboard/hot-areas', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const { Op } = require('sequelize');
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
+        const todayStr = toLocalDateOnly(today);
 
         const floors = await Floor.findAll();
         const areasData = await Promise.all(
@@ -3344,7 +3449,7 @@ router.get('/dashboard/hot-areas', authMiddleware, async (ctx) => {
                 });
                 const todayBookings = await Booking.count({
                     where: {
-                        date: { [Op.between]: [today, tomorrow] },
+                        date: todayStr,
                     },
                     include: [
                         {

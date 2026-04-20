@@ -17,6 +17,7 @@ import {
     getUserDisplayNameFromMap,
 } from '../utils/user-display';
 import { buildAuditFields, buildUpdatedBy } from '../utils/audit';
+import { formatRouteDateTimes } from '../utils/route-time-serializer';
 
 const router = new Router({ prefix: '/api/notification' });
 
@@ -33,6 +34,8 @@ router.get('/', authMiddleware, async (ctx) => {
             isRead,
             page = 1,
             limit = 20,
+            current,
+            pageSize,
             userId: queryUserId,
             targetType,
             targetRole,
@@ -96,8 +99,8 @@ router.get('/', authMiddleware, async (ctx) => {
             query.time = new Date(trange[0]);
         }
 
-        const pageNum = parseInt(page as string);
-        const pageLimit = parseInt(limit as string);
+        const pageNum = parseInt((current || page) as string);
+        const pageLimit = parseInt((pageSize || limit) as string);
 
         // Use lean fetch and manual user lookup to handle legacy records
         const notifications = await Notification.find(query)
@@ -131,43 +134,46 @@ router.get('/', authMiddleware, async (ctx) => {
                 ? getUserDisplayNameFromMap(resolvedUserId, userMap) ||
                   getUserDisplayName(notif.userId as any)
                 : undefined;
-            return {
-                id: notif._id,
-                title: notif.title,
-                content: notif.content,
-                type: notif.type,
-                time: notif.time,
-                isRead: notif.isRead,
-                relatedId: notif.relatedId,
-                userId: resolvedUserId,
-                userName,
-                userAvatar:
-                    (resolvedUserId &&
-                        userMap[String(resolvedUserId)]?.avatar) ||
-                    notif.userId?.avatar ||
-                    '' ||
-                    '',
-                publisher: notif.createdBy?._id || notif.createdBy,
-                publisherName:
-                    getUserDisplayName(notif.createdBy as any) ||
-                    getUserDisplayNameFromMap(notif.createdBy, userMap),
-                updatedBy: notif.updatedBy?._id || notif.updatedBy,
-                updatedByName:
-                    getUserDisplayName(notif.updatedBy as any) ||
-                    getUserDisplayNameFromMap(notif.updatedBy, userMap),
-                targetType: notif.targetType,
-                targetRole: notif.targetRole,
-                floorId: notif.floorId,
-            };
+            return formatRouteDateTimes(
+                {
+                    id: String(notif._id),
+                    title: notif.title,
+                    content: notif.content,
+                    type: notif.type,
+                    time: notif.time,
+                    isRead: notif.isRead,
+                    relatedId: notif.relatedId,
+                    userId: resolvedUserId,
+                    userName,
+                    userAvatar:
+                        (resolvedUserId &&
+                            userMap[String(resolvedUserId)]?.avatar) ||
+                        notif.userId?.avatar ||
+                        '' ||
+                        '',
+                    publisher: notif.createdBy?._id || notif.createdBy,
+                    publisherName:
+                        getUserDisplayName(notif.createdBy as any) ||
+                        getUserDisplayNameFromMap(notif.createdBy, userMap),
+                    updatedBy: notif.updatedBy?._id || notif.updatedBy,
+                    updatedByName:
+                        getUserDisplayName(notif.updatedBy as any) ||
+                        getUserDisplayNameFromMap(notif.updatedBy, userMap),
+                    targetType: notif.targetType,
+                    targetRole: notif.targetRole,
+                    floorId: notif.floorId,
+                },
+                ['time']
+            );
         });
 
         ctx.body = {
             success: true,
             data: {
-                notifications: mapped,
+                list: mapped,
                 total,
                 page: pageNum,
-                limit: pageLimit,
+                pageSize: pageLimit,
             },
         };
     } catch (error: any) {
@@ -539,26 +545,29 @@ router.get('/:id', authMiddleware, async (ctx) => {
 
         ctx.body = {
             success: true,
-            data: {
-                id: notification._id,
-                userId: resolvedUserId,
-                userName,
-                title: notification.title,
-                content: notification.content,
-                type: notification.type,
-                data: notification.data,
-                relatedId: notification.relatedId,
-                time: notification.time,
-                isRead: notification.isRead,
-                publisher: createdBy?._id || createdBy,
-                publisherName:
-                    getUserDisplayName(createdBy as any) ||
-                    getUserDisplayNameFromMap(createdByKey, userMap),
-                updatedBy: updatedBy?._id || updatedBy,
-                updatedByName:
-                    getUserDisplayName(updatedBy as any) ||
-                    getUserDisplayNameFromMap(updatedByKey, userMap),
-            },
+            data: formatRouteDateTimes(
+                {
+                    id: notification._id,
+                    userId: resolvedUserId,
+                    userName,
+                    title: notification.title,
+                    content: notification.content,
+                    type: notification.type,
+                    data: notification.data,
+                    relatedId: notification.relatedId,
+                    time: notification.time,
+                    isRead: notification.isRead,
+                    publisher: createdBy?._id || createdBy,
+                    publisherName:
+                        getUserDisplayName(createdBy as any) ||
+                        getUserDisplayNameFromMap(createdByKey, userMap),
+                    updatedBy: updatedBy?._id || updatedBy,
+                    updatedByName:
+                        getUserDisplayName(updatedBy as any) ||
+                        getUserDisplayNameFromMap(updatedByKey, userMap),
+                },
+                ['time']
+            ),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;

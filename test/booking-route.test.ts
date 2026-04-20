@@ -250,6 +250,7 @@ async function testCreateBookingSuccess() {
   const originalTransaction = bookingModule.bookingRouteDependencies.sequelizeTransaction;
   const originalResolveTimeSlot = bookingModule.bookingRouteDependencies.resolveTimeSlot;
   const originalValidateTime = bookingModule.bookingRouteDependencies.validateBookingTimeRange;
+  const originalCheckBookingPermissions = bookingModule.bookingRouteDependencies.checkBookingPermissions;
   const originalBuildPayload = bookingModule.bookingRouteDependencies.buildWechatTemplatePayload;
   const originalUserModel = bookingModule.bookingRouteDependencies.UserModel;
   const originalSendWechat = bookingModule.bookingRouteDependencies.sendWechatSubscribeMessage;
@@ -268,6 +269,10 @@ async function testCreateBookingSuccess() {
     isCustomTime: false,
     startTime: '08:00',
     endTime: '12:00',
+  });
+  bookingModule.bookingRouteDependencies.checkBookingPermissions = async () => ({
+    studentId: '20260001',
+    creditScore: 100,
   });
   bookingModule.bookingRouteDependencies.buildWechatTemplatePayload = async () => undefined;
   bookingModule.bookingRouteDependencies.UserModel = {
@@ -301,6 +306,7 @@ async function testCreateBookingSuccess() {
     bookingModule.bookingRouteDependencies.sequelizeTransaction = originalTransaction;
     bookingModule.bookingRouteDependencies.resolveTimeSlot = originalResolveTimeSlot;
     bookingModule.bookingRouteDependencies.validateBookingTimeRange = originalValidateTime;
+    bookingModule.bookingRouteDependencies.checkBookingPermissions = originalCheckBookingPermissions;
     bookingModule.bookingRouteDependencies.buildWechatTemplatePayload = originalBuildPayload;
     bookingModule.bookingRouteDependencies.UserModel = originalUserModel;
     bookingModule.bookingRouteDependencies.sendWechatSubscribeMessage = originalSendWechat;

@@ -24,6 +24,16 @@ export function parseTimeToMinutes(time: string): number | undefined {
     return Number(match[1]) * 60 + Number(match[2]);
 }
 
+function formatMinutesToTime(totalMinutes: number): string {
+    const safeMinutes = Math.max(0, Math.min(totalMinutes, 23 * 60 + 59));
+    const hours = Math.floor(safeMinutes / 60);
+    const minutes = safeMinutes % 60;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(
+        2,
+        '0'
+    )}`;
+}
+
 export type BookingTimeValidationResult = {
     startTime: string;
     endTime: string;
@@ -92,6 +102,9 @@ export async function validateBookingTimeRange(options: {
     const slotRange = await getTimeSlotRange(timeSlot);
     const slotStartMinutes = parseTimeToMinutes(slotRange.start)!;
     const slotEndMinutes = parseTimeToMinutes(slotRange.end)!;
+    const isToday = isSameDay(date, new Date());
+    const now = new Date();
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
     if (startMinutes !== undefined) {
         if (startMinutes < slotStartMinutes || startMinutes >= slotEndMinutes) {
@@ -126,15 +139,22 @@ export async function validateBookingTimeRange(options: {
         );
     }
 
-    if (isSameDay(date, new Date()) && startMinutes !== undefined) {
-        const now = new Date();
-        const nowMinutes = now.getHours() * 60 + now.getMinutes();
-        if (startMinutes <= nowMinutes) {
+    if (isToday && startMinutes !== undefined) {
+        if (startMinutes < nowMinutes) {
             throw new CustomError(
                 'Cannot book a custom time in the past',
                 ErrorCodes.INVALID_PARAMS
             );
         }
+    }
+
+    if (!isCustomTime && isToday) {
+        const adjustedStartMinutes = Math.max(slotStartMinutes, nowMinutes);
+        return {
+            startTime: formatMinutesToTime(adjustedStartMinutes),
+            endTime: slotRange.end,
+            isCustomTime: adjustedStartMinutes !== slotStartMinutes,
+        };
     }
 
     return {
@@ -159,7 +179,24 @@ export function parseLocalDate(dateStr: string): Date | undefined {
 }
 
 export function isSameDay(dateStr: string, compareDate: Date): boolean {
+    if (!dateStr || Number.isNaN(compareDate.getTime())) {
+        return false;
+    }
+
+    const normalized = String(dateStr).slice(0, 10);
+    const localDate = `${compareDate.getFullYear()}-${String(
+        compareDate.getMonth() + 1
+    ).padStart(2, '0')}-${String(compareDate.getDate()).padStart(2, '0')}`;
+    const isoDate = compareDate.toISOString().slice(0, 10);
+    if (normalized === localDate || normalized === isoDate) {
+        return true;
+    }
+
     const date = parseLocalDate(dateStr) || new Date(dateStr);
+    if (Number.isNaN(date.getTime())) {
+        return false;
+    }
+
     return (
         date.getFullYear() === compareDate.getFullYear() &&
         date.getMonth() === compareDate.getMonth() &&

@@ -8,6 +8,11 @@ import { getUserDisplayName } from '../utils/user-display';
 import { ErrorCodes } from '../utils/error-codes';
 import { normalizeSeatStatus } from '../utils/seat-status';
 import { Roles } from '../constants/roles';
+import { SystemDisplayName } from '../constants/credit';
+import {
+    formatRouteDateTime,
+    formatRouteDateTimes,
+} from '../utils/route-time-serializer';
 
 const router = new Router({ prefix: '/api/user' });
 
@@ -48,11 +53,11 @@ router.get('/profile', authMiddleware, async (ctx) => {
             String(normalizedUser.avatar || ''),
             ctx.origin
         );
-        normalizedUser.avatarUrl = normalizedUser.avatar;
+        (normalizedUser as any).avatarUrl = normalizedUser.avatar;
 
         ctx.body = {
             success: true,
-            data: normalizedUser,
+            data: formatRouteDateTimes(normalizedUser),
         };
     } catch (error) {
         if (error instanceof CustomError) {
@@ -123,23 +128,46 @@ router.put('/profile', authMiddleware, async (ctx) => {
                 try {
                     const url = await saveBase64Image(avatar, userId);
                     updateData.avatar = url;
-                } catch (e) {
-                    console.error('Save avatar failed', e);
-                    updateData.avatar = avatar;
+                } catch (e: any) {
+                    console.error('Save avatar failed', {
+                        userId,
+                        avatarLength: String(avatar).length,
+                        error: e?.message || e,
+                        stack: e?.stack,
+                    });
+                    throw new CustomError(
+                        `Upload avatar failed: ${
+                            e?.message || 'Unknown error'
+                        }`,
+                        ErrorCodes.UPDATE_PROFILE_ERROR
+                    );
                 }
             } else {
                 updateData.avatar = avatar;
             }
         }
 
-        await User.findByIdAndUpdate(userId, updateData, {
+        const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
             new: true,
             runValidators: true,
-        });
+        }).select('-password');
+
+        if (!updatedUser) {
+            throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
+        }
+
+        const normalizedUser = updatedUser.toObject();
+        delete (normalizedUser as any).isSuperAdmin;
+        normalizedUser.avatar = normalizeUploadUrl(
+            String(normalizedUser.avatar || ''),
+            ctx.origin
+        );
+        (normalizedUser as any).avatarUrl = normalizedUser.avatar;
 
         ctx.body = {
             success: true,
             message: '更新成功',
+            data: formatRouteDateTimes(normalizedUser),
         };
     } catch (error) {
         if (error instanceof CustomError) {
@@ -271,6 +299,7 @@ router.post('/favorite/:seatId', authMiddleware, async (ctx) => {
  */
 router.get('/favorites', authMiddleware, async (ctx) => {
     try {
+        const { page = '1', pageSize, limit } = ctx.query as any;
         const userId = (ctx as any).state.user.id;
         const user = await User.findById(userId).select('favorites');
 
@@ -294,22 +323,38 @@ router.get('/favorites', authMiddleware, async (ctx) => {
                       ],
                   })
                 : [];
+        const list = seats.map((seat: any) => ({
+            id: seat.id,
+            floorId: seat.floorId,
+            floorName: seat.floor?.name || '',
+            rowNum: seat.rowNum,
+            colNum: seat.colNum,
+            type: seat.type,
+            hasSocket: seat.hasSocket,
+            isWindow: seat.isWindow,
+            zone: seat.zone,
+            status: normalizeSeatStatus(seat.status),
+            description: seat.description,
+        }));
+        const total = list.length;
+        const safePage = Math.max(1, Number(page) || 1);
+        const safePageSize = Math.max(
+            1,
+            Number(pageSize ?? limit ?? total ?? 1)
+        );
+        const pagedList = list.slice(
+            (safePage - 1) * safePageSize,
+            safePage * safePageSize
+        );
 
         ctx.body = {
             success: true,
-            data: seats.map((seat: any) => ({
-                id: seat.id,
-                floorId: seat.floorId,
-                floorName: seat.floor?.name || '',
-                rowNum: seat.rowNum,
-                colNum: seat.colNum,
-                type: seat.type,
-                hasSocket: seat.hasSocket,
-                isWindow: seat.isWindow,
-                zone: seat.zone,
-                status: normalizeSeatStatus(seat.status),
-                description: seat.description,
-            })),
+            data: {
+                list: pagedList,
+                total,
+                page: safePage,
+                pageSize: safePageSize,
+            },
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -356,8 +401,10 @@ router.get('/credit', authMiddleware, async (ctx) => {
                     id: record._id,
                     type: record.type,
                     points: record.points,
-                    date: record.date,
+                    date: formatRouteDateTime(record.date),
                     reason: record.reason,
+                    reasonCode: record.reasonCode || record.reason,
+                    reasonText: record.reasonText || record.reason,
                 })),
             },
         };
@@ -378,17 +425,55 @@ router.get('/credit/records', authMiddleware, async (ctx) => {
     try {
         const userId = (ctx as any).state.user.id;
         const page = parseInt((ctx.query.page as string) || '1');
-        const limit = parseInt((ctx.query.limit as string) || '20');
+        const pageSize = parseInt(
+            (ctx.query.pageSize as string) ||
+                (ctx.query.limit as string) ||
+                '20'
+        );
 
         const isAdmin = (ctx as any).state.user?.role === Roles.ADMIN;
-        const query: any = isAdmin ? {} : { userId };
+        const { q, reason } = ctx.query as any;
+        const baseFilter: any = isAdmin ? {} : { userId };
+        const filters: any[] = [];
+
+        if (reason) {
+            filters.push({
+                $or: [
+                    { reason: { $regex: reason, $options: 'i' } },
+                    { reasonCode: { $regex: reason, $options: 'i' } },
+                    { reasonText: { $regex: reason, $options: 'i' } },
+                ],
+            });
+        }
+
+        if (q && isAdmin) {
+            const matchingUsers = await User.find({
+                $or: [
+                    { username: { $regex: q, $options: 'i' } },
+                    { name: { $regex: q, $options: 'i' } },
+                ],
+            })
+                .select('_id')
+                .lean();
+            const userIds = matchingUsers.map((u: any) => String(u._id));
+            filters.push(
+                userIds.length
+                    ? { userId: { $in: userIds } }
+                    : { userId: '__not_found__' }
+            );
+        }
+
+        const query: any = { ...baseFilter };
+        if (filters.length) {
+            query.$and = filters;
+        }
 
         const total = await CreditRecord.countDocuments(query);
 
         const records = await CreditRecord.find(query)
             .sort({ date: -1 })
-            .skip((page - 1) * limit)
-            .limit(limit)
+            .skip((page - 1) * pageSize)
+            .limit(pageSize)
             .populate('userId', 'username name studentId avatar')
             .populate('updatedBy', 'username name');
 
@@ -396,17 +481,20 @@ router.get('/credit/records', authMiddleware, async (ctx) => {
             id: record._id,
             type: record.type,
             points: record.points,
-            date: record.date,
+            date: formatRouteDateTime(record.date),
             reason: record.reason,
+            reasonCode: record.reasonCode || record.reason,
+            reasonText: record.reasonText || record.reason,
             userId: record.userId?._id || undefined,
             userName:
                 getUserDisplayName(record.userId as any) ||
-                record.userId?.studentId ||
+                (record.userId as any)?.studentId ||
                 '',
-            userAvatar: record.userId?.avatar || '',
+            userAvatar: (record.userId as any)?.avatar || '',
             updatedByName:
                 getUserDisplayName(record.updatedBy as any) ||
-                (record.updatedBy?._id ? String(record.updatedBy._id) : ''),
+                (record.updatedBy?._id ? String(record.updatedBy._id) : '') ||
+                SystemDisplayName,
         }));
 
         ctx.body = {
@@ -415,7 +503,7 @@ router.get('/credit/records', authMiddleware, async (ctx) => {
                 list: mappedRecords,
                 total,
                 page,
-                limit,
+                pageSize,
             },
         };
     } catch (error: any) {
@@ -477,13 +565,31 @@ router.post('/feedback', authMiddleware, async (ctx) => {
 router.get('/feedback/my', authMiddleware, async (ctx) => {
     try {
         const userId = (ctx as any).state.user.id;
-        const feedbacks = await Feedback.find({ userId }).sort({
-            createdAt: -1,
-        });
+        const { page = '1', pageSize, limit } = ctx.query as any;
+        const safePage = Math.max(1, Number(page) || 1);
+        const safePageSize = Math.max(1, Number(pageSize ?? limit ?? 20));
+
+        const total = await Feedback.countDocuments({ userId });
+        const feedbacks = await Feedback.find({ userId })
+            .sort({ createdAt: -1 })
+            .skip((safePage - 1) * safePageSize)
+            .limit(safePageSize)
+            .lean();
+        const list = feedbacks.map((item: any) =>
+            formatRouteDateTimes({
+                ...item,
+                id: String(item._id),
+            })
+        );
 
         ctx.body = {
             success: true,
-            data: feedbacks,
+            data: {
+                list,
+                total,
+                page: safePage,
+                pageSize: safePageSize,
+            },
         };
     } catch (error) {
         if (error instanceof CustomError) {

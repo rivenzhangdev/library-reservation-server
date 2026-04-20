@@ -5,6 +5,7 @@ interface SeatFacilityConfigAttributes {
     id: number;
     key: string;
     label: string;
+    icon: string;
     order: number;
     enabled: boolean;
     createdBy?: string | null;
@@ -27,6 +28,7 @@ class SeatFacilityConfig
     public id!: number;
     public key!: string;
     public label!: string;
+    public icon!: string;
     public order!: number;
     public enabled!: boolean;
     public createdBy!: string | null;
@@ -51,6 +53,12 @@ SeatFacilityConfig.init(
             type: DataTypes.STRING(64),
             allowNull: false,
             comment: 'Facility label',
+        },
+        icon: {
+            type: DataTypes.STRING(64),
+            allowNull: false,
+            defaultValue: 'search',
+            comment: 'Display icon key',
         },
         order: {
             type: DataTypes.INTEGER,

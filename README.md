@@ -116,6 +116,8 @@ pnpm db:reset
 
 ```bash
 pnpm db:mongo:init
+# 如需仅补齐默认超级管理员
+pnpm db:mongo:ensure-admin
 ```
 
 ### 3. 配置环境变量
@@ -179,22 +181,23 @@ pnpm format
 
 ## 📝 常用命令
 
-| 命令                    | 说明                          |
-| ----------------------- | ----------------------------- |
-| `pnpm dev`              | 启动开发服务器 (热重载)       |
-| `pnpm build`            | 编译 TypeScript 到 JavaScript |
-| `pnpm start`            | 启动生产环境服务              |
-| `pnpm switch:env`       | 查看/切换环境                 |
-| `pnpm switch:env:dev`   | 切换到开发环境并启动          |
-| `pnpm switch:env:test`  | 切换到测试环境并启动          |
-| `pnpm switch:env:uat`   | 切换到 UAT 环境并启动         |
-| `pnpm switch:env:prod`  | 切换到生产环境并启动          |
-| `pnpm db:init`          | 初始化 MySQL 数据库           |
-| `pnpm db:mongo:init`    | 初始化 MongoDB 数据库         |
-| `pnpm swagger`          | 启动 Swagger UI 文档服务      |
-| `pnpm generate:swagger` | 重新生成 Swagger API 文档     |
-| `pnpm config:env`       | 交互式配置环境变量            |
-| `pnpm config:env:check` | 检查环境配置状态              |
+| 命令                         | 说明                          |
+| ---------------------------- | ----------------------------- |
+| `pnpm dev`                   | 启动开发服务器 (热重载)       |
+| `pnpm build`                 | 编译 TypeScript 到 JavaScript |
+| `pnpm start`                 | 启动生产环境服务              |
+| `pnpm switch:env`            | 查看/切换环境                 |
+| `pnpm switch:env:dev`        | 切换到开发环境并启动          |
+| `pnpm switch:env:test`       | 切换到测试环境并启动          |
+| `pnpm switch:env:uat`        | 切换到 UAT 环境并启动         |
+| `pnpm switch:env:prod`       | 切换到生产环境并启动          |
+| `pnpm db:init`               | 初始化 MySQL 数据库           |
+| `pnpm db:mongo:init`         | 初始化 MongoDB 数据库         |
+| `pnpm db:mongo:ensure-admin` | 仅补齐/更新默认超级管理员     |
+| `pnpm swagger`               | 启动 Swagger UI 文档服务      |
+| `pnpm generate:swagger`      | 重新生成 Swagger API 文档     |
+| `pnpm config:env`            | 交互式配置环境变量            |
+| `pnpm config:env:check`      | 检查环境配置状态              |
 
 ## 🔒 安全最佳实践
 

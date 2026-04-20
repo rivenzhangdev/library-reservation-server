@@ -43,6 +43,42 @@ function getRemoteObjectKey(filename: string) {
     return MINIO_PATH_PREFIX ? `${MINIO_PATH_PREFIX}/${filename}` : filename;
 }
 
+function getObjectStream(objectName: string) {
+    return new Promise<any>((resolve, reject) => {
+        minioClient.getObject(
+            MINIO_BUCKET,
+            objectName,
+            (err: any, dataStream: any) => {
+                if (err) return reject(err);
+                resolve(dataStream);
+            }
+        );
+    });
+}
+
+async function findUploadStream(name: string) {
+    const triedKeys = [];
+    const candidateKeys = [getRemoteObjectKey(name)];
+    if (MINIO_PATH_PREFIX) {
+        candidateKeys.push(name);
+    }
+
+    for (const objectName of candidateKeys) {
+        triedKeys.push(objectName);
+        try {
+            const stream = await getObjectStream(objectName);
+            return { stream, objectName };
+        } catch (err: any) {
+            if (err?.code === 'NoSuchKey' || err?.statusCode === 404) {
+                continue;
+            }
+            throw { err, objectName, triedKeys };
+        }
+    }
+
+    throw { notFound: true, triedKeys };
+}
+
 router.get('/:name', async (ctx) => {
     const name = ctx.params.name as string;
     if (!name) {
@@ -60,27 +96,31 @@ router.get('/:name', async (ctx) => {
         return;
     }
 
-    const objectName = getRemoteObjectKey(name);
     try {
-        const stream = await new Promise<any>((resolve, reject) => {
-            minioClient.getObject(
-                MINIO_BUCKET,
-                objectName,
-                (err: any, dataStream: any) => {
-                    if (err) return reject(err);
-                    resolve(dataStream);
-                }
-            );
-        });
+        const { stream } = await findUploadStream(name);
         ctx.body = stream;
         return;
-    } catch (e: any) {
-        if (e?.code === 'NoSuchKey' || e?.statusCode === 404) {
+    } catch (error: any) {
+        if (error?.notFound) {
+            console.error('Upload not found in MinIO', {
+                bucket: MINIO_BUCKET,
+                prefix: MINIO_PATH_PREFIX,
+                name,
+                tried: error.triedKeys,
+            });
             ctx.status = 404;
             ctx.body = 'Not found';
             return;
         }
-        console.error('Failed to read upload from MinIO', e);
+
+        console.error('Failed to read upload from MinIO', {
+            bucket: MINIO_BUCKET,
+            prefix: MINIO_PATH_PREFIX,
+            name,
+            tried: error?.triedKeys || [getRemoteObjectKey(name)],
+            error: error?.err || error,
+        });
+
         ctx.status = 500;
         ctx.body = 'Internal server error';
         return;

@@ -3,8 +3,6 @@ import { CustomError } from '../middleware/error';
 import { ErrorCodes } from '../utils/error-codes';
 import { getTimeSlotConfigItems } from '../utils/time-slot-config';
 import {
-    getSeatTypeConfigItems,
-    getSeatFacilityConfigItems,
     ensureSeatTypeConfigItems,
     ensureSeatFacilityConfigItems,
 } from '../utils/seat-config';
@@ -12,12 +10,16 @@ import {
     CHECKIN_WINDOW_MINUTES,
     MIN_CUSTOM_BOOKING_DURATION_MINUTES,
 } from '../utils/booking-rules';
+import { getBookingRuleNumber } from './booking-rules';
 import { authMiddleware } from '../middleware/auth';
+import { buildAuditFields, buildUpdatedBy } from '../utils/audit';
 import {
     TimeSlotConfig,
     SeatTypeConfig,
     SeatFacilityConfig,
+    CreditRuleConfig,
 } from '../models/mysql';
+import { getCreditRuleValues } from '../utils/credit-rule-config';
 
 const router = new Router({ prefix: '/api/config' });
 
@@ -25,6 +27,107 @@ function generateConfigIdentifier() {
     return `generated-${String(Date.now()).slice(-6)}-${Math.random()
         .toString(36)
         .slice(2, 8)}`;
+}
+
+function normalizeIconValue(rawIcon: any) {
+    const icon = String(rawIcon || '').trim();
+    return icon || 'search';
+}
+
+function withAuditDisplayName(item: any) {
+    if (!item || typeof item !== 'object') return item;
+    const plain = typeof item.toJSON === 'function' ? item.toJSON() : item;
+
+    const createdByName =
+        plain.createdByName ??
+        (plain.createdBy ? String(plain.createdBy) : undefined);
+    const updatedByName =
+        plain.updatedByName ??
+        (plain.updatedBy ? String(plain.updatedBy) : undefined);
+
+    return {
+        ...plain,
+        ...(createdByName ? { createdByName } : {}),
+        ...(updatedByName ? { updatedByName } : {}),
+    };
+}
+
+function normalizeConfigResponseData(data: any) {
+    if (Array.isArray(data)) {
+        return data.map((item) => withAuditDisplayName(item));
+    }
+    return withAuditDisplayName(data);
+}
+
+export async function getCreditRules(ctx: any) {
+    try {
+        const config = await getCreditRuleValues();
+        ctx.body = {
+            success: true,
+            data: config,
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to get credit rules',
+            ErrorCodes.GET_CONFIG_ERROR
+        );
+    }
+}
+
+export async function updateCreditRules(ctx: any) {
+    try {
+        const {
+            bookingCheckoutRewardPoints,
+            activityCheckoutRewardPoints,
+            activityMissedCheckoutPenaltyPoints,
+            violationDeductPoints,
+        } = ctx.request.body as any;
+
+        const payload = {
+            bookingCheckoutRewardPoints: Number(bookingCheckoutRewardPoints),
+            activityCheckoutRewardPoints: Number(activityCheckoutRewardPoints),
+            activityMissedCheckoutPenaltyPoints: Number(
+                activityMissedCheckoutPenaltyPoints
+            ),
+            violationDeductPoints: Number(violationDeductPoints),
+        };
+
+        if (
+            Object.values(payload).some(
+                (value) => Number.isNaN(value) || value < 0
+            )
+        ) {
+            throw new CustomError(
+                'Invalid credit rule values',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        const existingConfig = await CreditRuleConfig.findOne();
+        if (existingConfig) {
+            await existingConfig.update({
+                ...payload,
+                ...buildUpdatedBy(ctx),
+            });
+        } else {
+            await CreditRuleConfig.create({
+                ...payload,
+                ...buildAuditFields(ctx),
+            });
+        }
+
+        ctx.body = {
+            success: true,
+            data: payload,
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to update credit rules',
+            ErrorCodes.UPDATE_SETTINGS_ERROR
+        );
+    }
 }
 
 /**
@@ -36,7 +139,7 @@ router.get('/time-slots', async (ctx) => {
         const configs = await getTimeSlotConfigItems();
         ctx.body = {
             success: true,
-            data: configs,
+            data: normalizeConfigResponseData(configs),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -47,14 +150,19 @@ router.get('/time-slots', async (ctx) => {
     }
 });
 
-router.get('/booking-rules', async (ctx) => {
+export async function getBookingRules(ctx: any) {
     try {
+        const maxRenewalExtraSlots = await getBookingRuleNumber(
+            'renewal.maxExtraSlots',
+            1
+        );
         ctx.body = {
             success: true,
             data: {
                 minCustomBookingDurationMinutes:
                     MIN_CUSTOM_BOOKING_DURATION_MINUTES,
                 checkinWindowMinutes: CHECKIN_WINDOW_MINUTES,
+                maxRenewalExtraSlots,
             },
         };
     } catch (error: any) {
@@ -64,7 +172,13 @@ router.get('/booking-rules', async (ctx) => {
             ErrorCodes.GET_CONFIG_ERROR
         );
     }
-});
+}
+
+router.get('/booking-rules', getBookingRules);
+
+router.get('/credit-rules', getCreditRules);
+
+router.put('/credit-rules', authMiddleware, updateCreditRules);
 
 router.post('/time-slots', authMiddleware, async (ctx) => {
     try {
@@ -119,7 +233,7 @@ router.post('/time-slots', authMiddleware, async (ctx) => {
 
         ctx.body = {
             success: true,
-            data: item,
+            data: normalizeConfigResponseData(item),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -167,7 +281,7 @@ router.put('/time-slots/:id', authMiddleware, async (ctx) => {
 
         ctx.body = {
             success: true,
-            data: config,
+            data: normalizeConfigResponseData(config),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -209,7 +323,7 @@ router.get('/seat-types', async (ctx) => {
         const configs = await ensureSeatTypeConfigItems();
         ctx.body = {
             success: true,
-            data: configs,
+            data: normalizeConfigResponseData(configs),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -222,7 +336,8 @@ router.get('/seat-types', async (ctx) => {
 
 router.post('/seat-types', authMiddleware, async (ctx) => {
     try {
-        const { type, value, label, order, enabled } = ctx.request.body as any;
+        const { type, value, label, icon, order, enabled } = ctx.request
+            .body as any;
         if (!label) {
             throw new CustomError(
                 'Missing required seat type parameters',
@@ -274,6 +389,7 @@ router.post('/seat-types', authMiddleware, async (ctx) => {
             type: typeCode,
             value: value || generateConfigIdentifier(),
             label,
+            icon: normalizeIconValue(icon),
             order: Number.isFinite(Number(order)) ? Number(order) : 0,
             enabled: typeof enabled === 'boolean' ? enabled : true,
             createdBy: (ctx as any).state.user?.username || null,
@@ -282,7 +398,7 @@ router.post('/seat-types', authMiddleware, async (ctx) => {
 
         ctx.body = {
             success: true,
-            data: item,
+            data: normalizeConfigResponseData(item),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -296,7 +412,8 @@ router.post('/seat-types', authMiddleware, async (ctx) => {
 router.put('/seat-types/:id', authMiddleware, async (ctx) => {
     try {
         const id = Number(ctx.params.id);
-        const { type, value, label, order, enabled } = ctx.request.body as any;
+        const { type, value, label, icon, order, enabled } = ctx.request
+            .body as any;
         const config = await SeatTypeConfig.findByPk(id);
         if (!config) {
             throw new CustomError(
@@ -341,6 +458,10 @@ router.put('/seat-types/:id', authMiddleware, async (ctx) => {
             type: typeof type !== 'undefined' ? Number(type) : config.type,
             value: value ?? config.value,
             label: label ?? config.label,
+            icon:
+                typeof icon !== 'undefined'
+                    ? normalizeIconValue(icon)
+                    : config.icon,
             order: Number.isFinite(Number(order))
                 ? Number(order)
                 : config.order,
@@ -350,7 +471,7 @@ router.put('/seat-types/:id', authMiddleware, async (ctx) => {
 
         ctx.body = {
             success: true,
-            data: config,
+            data: normalizeConfigResponseData(config),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -392,7 +513,7 @@ router.get('/seat-facilities', async (ctx) => {
         const configs = await ensureSeatFacilityConfigItems();
         ctx.body = {
             success: true,
-            data: configs,
+            data: normalizeConfigResponseData(configs),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -405,7 +526,7 @@ router.get('/seat-facilities', async (ctx) => {
 
 router.post('/seat-facilities', authMiddleware, async (ctx) => {
     try {
-        const { key, label, order, enabled } = ctx.request.body as any;
+        const { key, label, icon, order, enabled } = ctx.request.body as any;
         if (!label) {
             throw new CustomError(
                 'Missing required facility parameters',
@@ -426,6 +547,7 @@ router.post('/seat-facilities', authMiddleware, async (ctx) => {
         const item = await SeatFacilityConfig.create({
             key: key || generateConfigIdentifier(),
             label,
+            icon: normalizeIconValue(icon),
             order: Number.isFinite(Number(order)) ? Number(order) : 0,
             enabled: typeof enabled === 'boolean' ? enabled : true,
             createdBy: (ctx as any).state.user?.username || null,
@@ -434,7 +556,7 @@ router.post('/seat-facilities', authMiddleware, async (ctx) => {
 
         ctx.body = {
             success: true,
-            data: item,
+            data: normalizeConfigResponseData(item),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
@@ -448,7 +570,7 @@ router.post('/seat-facilities', authMiddleware, async (ctx) => {
 router.put('/seat-facilities/:id', authMiddleware, async (ctx) => {
     try {
         const id = Number(ctx.params.id);
-        const { key, label, order, enabled } = ctx.request.body as any;
+        const { key, label, icon, order, enabled } = ctx.request.body as any;
         const config = await SeatFacilityConfig.findByPk(id);
         if (!config) {
             throw new CustomError(
@@ -470,6 +592,10 @@ router.put('/seat-facilities/:id', authMiddleware, async (ctx) => {
         await config.update({
             key: key ?? config.key,
             label: label ?? config.label,
+            icon:
+                typeof icon !== 'undefined'
+                    ? normalizeIconValue(icon)
+                    : config.icon,
             order: Number.isFinite(Number(order))
                 ? Number(order)
                 : config.order,
@@ -479,7 +605,7 @@ router.put('/seat-facilities/:id', authMiddleware, async (ctx) => {
 
         ctx.body = {
             success: true,
-            data: config,
+            data: normalizeConfigResponseData(config),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;

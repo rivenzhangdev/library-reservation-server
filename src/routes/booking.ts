@@ -1,411 +1,61 @@
 import Router from 'koa-router';
 import { authMiddleware, ensureNotBlacklisted } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
-import { Notification, User, CreditRecord } from '../models/mongodb';
-import { Booking, Floor, Seat, TimeSlotStatus } from '../models/mysql';
-import { Op, Transaction } from 'sequelize';
-import sequelize from '../database/mysql';
+import { Booking, Floor, Seat } from '../models/mysql';
+import { Op } from 'sequelize';
 import { BookingStatus, TimeSlotStatusValue } from '../models/mysql/types';
 import { normalizeNumericEnum } from '../utils/enum-normalizers';
 import { buildAuditFields, buildUpdatedBy } from '../utils/audit';
 import { ErrorCodes } from '../utils/error-codes';
+import { getUserDisplayNameFromMap } from '../utils/user-display';
 import {
-    buildWechatTemplatePayload,
-    wechatTemplateConfig,
-} from '../utils/wechat-template-config';
-import { sendWechatSubscribeMessage } from '../utils/wechat';
+    formatRouteDateTime,
+    formatRouteDateTimes,
+} from '../utils/route-time-serializer';
+import { getTimeSlotConfigItems } from '../utils/time-slot-config';
 import {
-    getUserDisplayName,
-    getUserDisplayNameFromMap,
-} from '../utils/user-display';
-import { resolveTimeSlot } from '../utils/time-slot-config';
-import {
-    CHECKIN_WINDOW_MINUTES,
-    getBookingEndMinutes,
-    validateBookingTimeRange,
-    isCheckinAllowed,
-    isSameDay,
-    parseLocalDate,
-} from '../utils/booking-rules';
+    bookingRouteDependencies,
+    buildRenewBookingData as buildRenewBookingDataService,
+    checkBookingPermissions as checkBookingPermissionsService,
+    expireBookingIfNeeded as expireBookingIfNeededService,
+    getBookingEndSlot as getBookingEndSlotService,
+    isBookingOverdue as isBookingOverdueService,
+    markAllExpiredBookings as markAllExpiredBookingsService,
+    performBookingCheckin as performBookingCheckinService,
+    performBookingCheckout as performBookingCheckoutService,
+    performBookingRenew as performBookingRenewService,
+    releaseBookingTimeSlot as releaseBookingTimeSlotService,
+    validateBookingRequest as validateBookingRequestService,
+} from '../services/booking-service';
 
 const router = new Router({ prefix: '/api/booking' });
 
-async function ensureViolationCreditRecord(booking: any, operatorId?: string) {
-    if (!booking?.id || !booking.userId) return;
+export { bookingRouteDependencies };
 
-    const existingRecord = await CreditRecord.findOne({
-        bookingId: booking.id,
-        type: 1,
-    }).lean();
-    if (existingRecord) return;
-
-    const user = await User.findById(booking.userId);
-    if (!user) return;
-
-    const penaltyPoints = Number(process.env.VIOLATION_DEDUCT_POINTS ?? 5);
-    user.creditScore = Math.max(0, (user.creditScore ?? 100) - penaltyPoints);
-    await user.save();
-
-    await CreditRecord.create({
-        userId: booking.userId,
-        bookingId: booking.id,
-        type: 1,
-        points: penaltyPoints,
-        reason: 'Violation penalty',
-        updatedBy: operatorId,
-    });
-}
-
-export async function releaseBookingTimeSlot(
-    booking: any,
-    transaction?: Transaction
-) {
-    if (!booking?.seatId || !booking.date) return;
-    await TimeSlotStatus.update(
-        { status: TimeSlotStatusValue.AVAILABLE, bookingId: undefined },
-        {
-            where: {
-                seatId: booking.seatId,
-                date: booking.date,
-                timeSlot: booking.timeSlot,
-            },
-            transaction,
-        }
-    );
-}
-
-export async function performBookingCheckin(
-    booking: any,
-    userId: string,
-    creditRecordModel = CreditRecord
-): Promise<void> {
-    if (!booking) {
-        throw new CustomError(
-            'Booking not found',
-            ErrorCodes.BOOKING_NOT_FOUND
-        );
-    }
-    if (booking.status !== BookingStatus.UPCOMING) {
-        throw new CustomError(
-            'Check-in is not allowed for this booking',
-            ErrorCodes.CHECKIN_NOT_ALLOWED
-        );
-    }
-    if (!(await isCheckinAllowed(booking))) {
-        throw new CustomError(
-            `Check-in is only allowed within ${CHECKIN_WINDOW_MINUTES} minutes before start and before the end time`,
-            ErrorCodes.CHECKIN_NOT_ALLOWED
-        );
-    }
-    await booking.update({
-        status: BookingStatus.ONGOING,
-    });
-    await creditRecordModel.create({
-        userId: booking.userId,
-        bookingId: booking.id,
-        type: 0,
-        points: 0,
-        reason: 'Booking check-in',
-        updatedBy: userId,
-    });
-}
-
-export async function performBookingCheckout(
-    booking: any,
-    userId: string,
-    releaseFn = releaseBookingTimeSlot,
-    expireFn = expireBookingIfNeeded
-): Promise<void> {
-    if (!booking) {
-        throw new CustomError(
-            'Booking not found',
-            ErrorCodes.BOOKING_NOT_FOUND
-        );
-    }
-    if (booking.status !== BookingStatus.ONGOING) {
-        throw new CustomError(
-            'Check-out is not allowed for this booking',
-            ErrorCodes.CHECKIN_NOT_ALLOWED
-        );
-    }
-    if (await isBookingOverdue(booking)) {
-        await expireFn(booking, userId);
-        throw new CustomError(
-            'Booking has expired and is marked as violated; check-out is not allowed',
-            ErrorCodes.CHECKIN_NOT_ALLOWED
-        );
-    }
-    await booking.update({
-        status: BookingStatus.COMPLETED,
-    });
-    await releaseFn(booking);
-}
-
-export async function isBookingOverdue(booking: any): Promise<boolean> {
-    if (!booking) return false;
-    const bookingDate =
-        parseLocalDate(String(booking.date)) ?? new Date(String(booking.date));
-    if (Number.isNaN(bookingDate.getTime())) return false;
-
-    const now = new Date();
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-    const checkDate = new Date(bookingDate);
-    checkDate.setHours(0, 0, 0, 0);
-
-    if (checkDate.getTime() < todayStart.getTime()) {
-        return true;
-    }
-    if (!isSameDay(String(booking.date), now)) {
-        return false;
-    }
-
-    const endMinutes = await getBookingEndMinutes(booking);
-    if (endMinutes === undefined) return false;
-
-    const nowMinutes = now.getHours() * 60 + now.getMinutes();
-    return nowMinutes > endMinutes;
-}
-
-export async function buildRenewBookingData(
-    booking: any,
-    timeSlot: number,
-    validateFn: typeof validateBookingTimeRange = validateBookingTimeRange
-): Promise<{
-    date: Date;
-    timeSlot: number;
-    startTime?: string;
-    endTime?: string;
-}> {
-    const bookingDateString =
-        typeof booking.date === 'string'
-            ? booking.date
-            : new Date(booking.date).toISOString().split('T')[0];
-    const bookingDate = new Date(bookingDateString);
-
-    const { startTime, endTime } = await validateFn({
-        date: bookingDateString,
-        timeSlot,
-    });
-
-    return {
-        date: bookingDate,
-        timeSlot,
-        startTime,
-        endTime,
-    };
-}
-
-export async function performBookingRenew(
-    booking: any,
-    requestTimeSlot: any,
-    ctx: any,
-    options: {
-        resolveTimeSlot?: (value: any) => Promise<number | undefined>;
-        validateBookingTimeRange?: typeof validateBookingTimeRange;
-        bookingModel?: typeof Booking;
-        timeSlotStatusModel?: typeof TimeSlotStatus;
-        transactionProvider?: (
-            callback: (t: Transaction) => Promise<any>
-        ) => Promise<any>;
-        releaseFn?: typeof releaseBookingTimeSlot;
-        buildAuditFieldsFn?: typeof buildAuditFields;
-        buildUpdatedByFn?: typeof buildUpdatedBy;
-    } = {}
-): Promise<any> {
-    const resolveTimeSlotFn = options.resolveTimeSlot ?? resolveTimeSlot;
-    const validateFn =
-        options.validateBookingTimeRange ?? validateBookingTimeRange;
-    const bookingModel = options.bookingModel ?? Booking;
-    const timeSlotStatusModel = options.timeSlotStatusModel ?? TimeSlotStatus;
-    const transactionProvider =
-        options.transactionProvider ??
-        ((callback: (t: Transaction) => Promise<any>) =>
-            sequelize.transaction(callback));
-    const releaseFn = options.releaseFn ?? releaseBookingTimeSlot;
-    const buildAuditFieldsFn = options.buildAuditFieldsFn ?? buildAuditFields;
-    const buildUpdatedByFn = options.buildUpdatedByFn ?? buildUpdatedBy;
-
-    const normalizedTimeSlot = await resolveTimeSlotFn(requestTimeSlot);
-    if (normalizedTimeSlot === undefined) {
-        throw new CustomError('Invalid timeSlot', ErrorCodes.INVALID_PARAMS);
-    }
-    if (normalizedTimeSlot === booking.timeSlot) {
-        throw new CustomError(
-            'Cannot renew to the same time slot',
-            ErrorCodes.INVALID_PARAMS
-        );
-    }
-    if (normalizedTimeSlot < booking.timeSlot) {
-        throw new CustomError(
-            'Renewal must move to a later time slot',
-            ErrorCodes.INVALID_PARAMS
-        );
-    }
-    if (
-        ![BookingStatus.UPCOMING, BookingStatus.ONGOING].includes(
-            booking.status
-        )
-    ) {
-        throw new CustomError(
-            'Only active bookings can be renewed',
-            ErrorCodes.INVALID_PARAMS
-        );
-    }
-
-    const renewalData = await buildRenewBookingData(
-        booking,
-        normalizedTimeSlot,
-        validateFn
-    );
-
-    const newBooking = await transactionProvider(async (t) => {
-        if (booking.status === BookingStatus.UPCOMING) {
-            await booking.update(
-                {
-                    status: BookingStatus.CANCELED,
-                    ...buildUpdatedByFn(ctx),
-                },
-                { transaction: t }
-            );
-            await releaseFn(booking, t);
-        }
-
-        const existingStatus = await timeSlotStatusModel.findOne({
-            where: {
-                seatId: booking.seatId,
-                date: renewalData.date,
-                timeSlot: normalizedTimeSlot,
-            },
-            transaction: t,
-        });
-
-        if (existingStatus?.status === TimeSlotStatusValue.BOOKED) {
-            throw new CustomError(
-                'This time slot has been booked',
-                ErrorCodes.BOOKING_CONFLICT
-            );
-        }
-
-        const createdBooking = await bookingModel.create(
-            {
-                userId: booking.userId,
-                seatId: booking.seatId,
-                date: renewalData.date,
-                timeSlot: renewalData.timeSlot,
-                startTime: renewalData.startTime as any,
-                endTime: renewalData.endTime as any,
-                status: BookingStatus.UPCOMING,
-                ...buildAuditFieldsFn(ctx),
-            },
-            { transaction: t }
-        );
-
-        await timeSlotStatusModel.upsert(
-            {
-                seatId: booking.seatId,
-                date: renewalData.date,
-                timeSlot: normalizedTimeSlot,
-                status: TimeSlotStatusValue.BOOKED,
-                bookingId: createdBooking.id,
-            },
-            { transaction: t }
-        );
-
-        return createdBooking;
-    });
-
-    return newBooking;
-}
-
-export async function expireBookingIfNeeded(
-    booking: any,
-    operatorId?: string
-): Promise<boolean> {
-    if (!booking) return false;
-    if (
-        ![BookingStatus.UPCOMING, BookingStatus.ONGOING].includes(
-            booking.status
-        )
-    ) {
-        return false;
-    }
-
-    const today = new Date();
-    const bookingDate = new Date(booking.date);
-    bookingDate.setHours(0, 0, 0, 0);
-    const todayStart = new Date(today);
-    todayStart.setHours(0, 0, 0, 0);
-    const datePassed = bookingDate.getTime() < todayStart.getTime();
-    const sameDay = bookingDate.getTime() === todayStart.getTime();
-    let expired = false;
-
-    if (datePassed) {
-        expired = true;
-    } else if (sameDay) {
-        const endMinutes = await getBookingEndMinutes(booking);
-        if (endMinutes !== undefined) {
-            const nowMinutes = today.getHours() * 60 + today.getMinutes();
-            if (nowMinutes >= endMinutes) {
-                expired = true;
-            }
-        }
-    }
-
-    if (!expired) return false;
-
-    await booking.update({
-        status: BookingStatus.VIOLATED,
-        ...(operatorId ? { updatedBy: operatorId } : {}),
-    });
-    await releaseBookingTimeSlot(booking);
-    await ensureViolationCreditRecord(booking, operatorId);
-    return true;
-}
-
-async function markUserExpiredBookings(userId: string, operatorId?: string) {
-    const bookings = await Booking.findAll({
-        where: {
-            userId: userId.toString(),
-            status: {
-                [Op.in]: [BookingStatus.UPCOMING, BookingStatus.ONGOING],
-            },
-        },
-    });
-
-    for (const booking of bookings) {
-        await expireBookingIfNeeded(booking, operatorId);
-    }
-}
-
-export async function markAllExpiredBookings() {
-    const bookings = await Booking.findAll({
-        where: {
-            status: {
-                [Op.in]: [BookingStatus.UPCOMING, BookingStatus.ONGOING],
-            },
-        },
-    });
-
-    for (const booking of bookings) {
-        await expireBookingIfNeeded(booking);
-    }
-}
+export const releaseBookingTimeSlot = releaseBookingTimeSlotService;
+export const buildRenewBookingData = buildRenewBookingDataService;
+export const validateBookingRequest = validateBookingRequestService;
+export const checkBookingPermissions = checkBookingPermissionsService;
+export const isBookingOverdue = isBookingOverdueService;
+export const expireBookingIfNeeded = expireBookingIfNeededService;
+export const markAllExpiredBookings = markAllExpiredBookingsService;
+export const performBookingCheckin = performBookingCheckinService;
+export const performBookingCheckout = performBookingCheckoutService;
+export const performBookingRenew = performBookingRenewService;
+export const getBookingEndSlot = getBookingEndSlotService;
 
 export async function createBooking(ctx: any) {
     try {
         ensureNotBlacklisted(ctx);
         const userId = (ctx as any).state.user.id;
-        const { seatId, date, timeSlot, startTime, endTime } = ctx.request
-            .body as any;
-
-        // Validate required parameters
-        if (!seatId || !date || timeSlot === undefined || timeSlot === null) {
-            throw new CustomError(
-                'Missing required parameters',
-                ErrorCodes.INVALID_PARAMS
+        const { seatId, date, timeSlot, startTime, endTime } =
+            bookingRouteDependencies.validateBookingRequest(
+                (ctx.request.body ?? {}) as any
             );
-        }
+
+        await bookingRouteDependencies.checkBookingPermissions(userId, {
+            requireStudentId: true,
+        });
 
         // Check if seat exists
         const seat = await bookingRouteDependencies.Seat.findByPk(seatId);
@@ -476,7 +126,7 @@ export async function createBooking(ctx: any) {
                 {
                     userId: userId.toString(),
                     seatId,
-                    date,
+                    date: date as any,
                     timeSlot: normalizedTimeSlot,
                     startTime: finalStartTime as any,
                     endTime: finalEndTime as any,
@@ -498,7 +148,7 @@ export async function createBooking(ctx: any) {
                 await bookingRouteDependencies.TimeSlotStatus.create(
                     {
                         seatId,
-                        date,
+                        date: date as any,
                         timeSlot: normalizedTimeSlot,
                         status: TimeSlotStatusValue.BOOKED, // 使用数字枚举
                         bookingId: booking.id,
@@ -619,8 +269,16 @@ router.post('/', authMiddleware, createBooking);
 router.get('/my', authMiddleware, async (ctx) => {
     try {
         const userId = (ctx as any).state.user.id;
-        await markUserExpiredBookings(userId, userId.toString());
-        const { status, page = 1, limit = 20 } = ctx.query as any;
+        await bookingRouteDependencies.markUserExpiredBookings(
+            userId,
+            userId.toString()
+        );
+        const {
+            status,
+            page = 1,
+            pageSize: queryPageSize,
+            limit,
+        } = ctx.query as any;
 
         const where: any = { userId: userId.toString() };
         if (status !== undefined) {
@@ -631,7 +289,7 @@ router.get('/my', authMiddleware, async (ctx) => {
         }
 
         const pageNum = parseInt(page as string);
-        const pageLimit = parseInt(limit as string);
+        const pageLimit = parseInt(String(queryPageSize ?? limit ?? 20), 10);
 
         const { count, rows } = await Booking.findAndCountAll({
             where,
@@ -654,31 +312,138 @@ router.get('/my', authMiddleware, async (ctx) => {
             offset: (pageNum - 1) * pageLimit,
         });
 
-        const bookings = rows.map((booking) => ({
-            id: booking.id,
-            seatId: booking.seatId,
-            floorName: (booking as any).seat?.floor?.name ?? '',
-            rowNum: (booking as any).seat?.rowNum ?? 0,
-            colNum: (booking as any).seat?.colNum ?? 0,
-            zone: (booking as any).seat?.zone ?? '',
-            type: (booking as any).seat?.type ?? '',
-            description: (booking as any).seat?.description ?? '',
-            hasSocket: !!(booking as any).seat?.hasSocket,
-            isWindow: !!(booking as any).seat?.isWindow,
-            date: booking.date,
-            timeSlot: booking.timeSlot,
-            startTime: booking.startTime,
-            endTime: booking.endTime,
-            status: booking.status,
-        }));
+        const slotConfigs = await getTimeSlotConfigItems();
+        const maxTimeSlot = slotConfigs.reduce(
+            (max, item) => Math.max(max, item.timeSlot),
+            -1
+        );
+
+        const renewalStatusConditions: any[] = [];
+        const bookingRenewalTargets: Array<{
+            seatId: number;
+            date: string;
+            timeSlot: number;
+        }> = [];
+
+        rows.forEach((booking) => {
+            if (
+                booking.status === BookingStatus.UPCOMING &&
+                Number.isFinite(booking.timeSlot) &&
+                booking.timeSlot < maxTimeSlot
+            ) {
+                const bookingDate = String(booking.date);
+                for (
+                    let slot = booking.timeSlot + 1;
+                    slot <= maxTimeSlot;
+                    slot += 1
+                ) {
+                    bookingRenewalTargets.push({
+                        seatId: booking.seatId,
+                        date: bookingDate,
+                        timeSlot: slot,
+                    });
+                }
+            }
+        });
+
+        if (bookingRenewalTargets.length > 0) {
+            bookingRenewalTargets.forEach((target) => {
+                renewalStatusConditions.push({
+                    seatId: target.seatId,
+                    date: target.date,
+                    timeSlot: target.timeSlot,
+                });
+            });
+        }
+
+        const renewalStatuses =
+            renewalStatusConditions.length > 0
+                ? await bookingRouteDependencies.TimeSlotStatus.findAll({
+                      where: {
+                          [Op.or]: renewalStatusConditions,
+                      },
+                  })
+                : [];
+
+        const renewalStatusMap: Record<string, number> = {};
+        renewalStatuses.forEach((status) => {
+            renewalStatusMap[
+                `${String(status.seatId)}|${String(status.date)}|${String(
+                    status.timeSlot
+                )}`
+            ] = status.status;
+        });
+
+        const list = await Promise.all(
+            rows.map(async (booking) => {
+                const bookingDate = String(booking.date);
+                const renewableTimeSlots: number[] = [];
+                if (
+                    booking.status === BookingStatus.UPCOMING &&
+                    Number.isFinite(booking.timeSlot)
+                ) {
+                    const currentEndSlot =
+                        (await getBookingEndSlot(booking)) ?? booking.timeSlot;
+                    for (
+                        let slot = currentEndSlot + 1;
+                        slot <= maxTimeSlot;
+                        slot += 1
+                    ) {
+                        let blocked = false;
+                        for (
+                            let checkSlot = currentEndSlot + 1;
+                            checkSlot <= slot;
+                            checkSlot += 1
+                        ) {
+                            const key = `${String(
+                                booking.seatId
+                            )}|${bookingDate}|${checkSlot}`;
+                            const slotStatus = renewalStatusMap[key];
+                            if (
+                                slotStatus !== undefined &&
+                                slotStatus !== TimeSlotStatusValue.AVAILABLE
+                            ) {
+                                blocked = true;
+                                break;
+                            }
+                        }
+                        if (!blocked) {
+                            renewableTimeSlots.push(slot);
+                        }
+                    }
+                }
+
+                return {
+                    id: booking.id,
+                    seatId: booking.seatId,
+                    floorName: (booking as any).seat?.floor?.name ?? '',
+                    rowNum: (booking as any).seat?.rowNum ?? 0,
+                    colNum: (booking as any).seat?.colNum ?? 0,
+                    zone: (booking as any).seat?.zone ?? '',
+                    type: (booking as any).seat?.type ?? '',
+                    description: (booking as any).seat?.description ?? '',
+                    hasSocket: !!(booking as any).seat?.hasSocket,
+                    isWindow: !!(booking as any).seat?.isWindow,
+                    date: booking.date,
+                    timeSlot: booking.timeSlot,
+                    startTime: formatRouteDateTime(booking.startTime),
+                    endTime: formatRouteDateTime(booking.endTime),
+                    status: booking.status,
+                    renewableTimeSlots,
+                    canRenew:
+                        booking.status === BookingStatus.UPCOMING &&
+                        renewableTimeSlots.length > 0,
+                };
+            })
+        );
 
         ctx.body = {
             success: true,
             data: {
-                bookings,
+                list,
                 total: count,
                 page: pageNum,
-                limit: pageLimit,
+                pageSize: pageLimit,
             },
         };
     } catch (error: any) {
@@ -744,7 +509,10 @@ export async function checkinBooking(ctx: any) {
         const bookingId = ctx.params.id;
         const userId = (ctx as any).state.user.id;
 
-        await markUserExpiredBookings(userId, userId.toString());
+        await bookingRouteDependencies.markUserExpiredBookings(
+            userId,
+            userId.toString()
+        );
         const booking = await Booking.findOne({
             where: {
                 id: bookingId,
@@ -857,35 +625,13 @@ export async function renewBooking(ctx: any) {
 
         ctx.body = {
             success: true,
-            data: newBooking,
+            data: formatRouteDateTimes(newBooking),
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
         throw new CustomError('Renewal failed', ErrorCodes.RENEW_BOOKING_ERROR);
     }
 }
-
-export const bookingRouteDependencies = {
-    performBookingCheckin: async (booking: any, userId: string) =>
-        performBookingCheckin(booking, userId),
-    performBookingCheckout: async (booking: any, userId: string) =>
-        performBookingCheckout(booking, userId),
-    performBookingRenew: async (booking: any, requestTimeSlot: any, ctx: any) =>
-        performBookingRenew(booking, requestTimeSlot, ctx),
-    sequelizeTransaction: async (callback: (t: Transaction) => Promise<any>) =>
-        sequelize.transaction(callback),
-    markAllExpiredBookings: markAllExpiredBookings,
-    resolveTimeSlot,
-    validateBookingTimeRange,
-    buildWechatTemplatePayload,
-    wechatTemplateConfig,
-    sendWechatSubscribeMessage,
-    getUserDisplayName,
-    UserModel: User,
-    Seat,
-    TimeSlotStatus,
-    Notification,
-};
 
 /**
  * @route POST /api/booking/renew/:id
@@ -938,7 +684,9 @@ router.get('/:id', authMiddleware, async (ctx) => {
             userIdsToFetch.push((booking as any).updatedBy);
         const uniq = Array.from(new Set(userIdsToFetch));
         const users = uniq.length
-            ? await User.find({ _id: { $in: uniq } }).select('name username')
+            ? await bookingRouteDependencies.UserModel.find({
+                  _id: { $in: uniq },
+              }).select('name username')
             : [];
         const userMap: Record<string, any> = {};
         users.forEach((u: any) => {
@@ -960,11 +708,11 @@ router.get('/:id', authMiddleware, async (ctx) => {
                 isWindow: !!(booking as any).seat?.isWindow,
                 date: booking.date,
                 timeSlot: booking.timeSlot,
-                startTime: booking.startTime,
-                endTime: booking.endTime,
+                startTime: formatRouteDateTime(booking.startTime),
+                endTime: formatRouteDateTime(booking.endTime),
                 status: booking.status,
-                createdAt: (booking as any).created_at,
-                updatedAt: (booking as any).updated_at,
+                createdAt: formatRouteDateTime((booking as any).created_at),
+                updatedAt: formatRouteDateTime((booking as any).updated_at),
                 userName: getUserDisplayNameFromMap(booking.userId, userMap),
                 createdBy: (booking as any).createdBy,
                 createdByName: getUserDisplayNameFromMap(

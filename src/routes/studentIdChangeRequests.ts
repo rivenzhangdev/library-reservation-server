@@ -2,7 +2,10 @@ import Router from 'koa-router';
 import { authMiddleware, adminMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { Notification, User, StudentIdChangeRequest } from '../models/mongodb';
+import { getUserDisplayName } from '../utils/user-display';
+import { maskStudentId } from '../utils/mask';
 import { ErrorCodes } from '../utils/error-codes';
+import { formatRouteDateTimes } from '../utils/route-time-serializer';
 
 const router = new Router({ prefix: '/api/student-id-change-requests' });
 
@@ -109,6 +112,7 @@ router.get('/', authMiddleware, adminMiddleware, async (ctx) => {
             status,
             q,
             page = '1',
+            pageSize,
             limit = '20',
             studentId,
             name,
@@ -137,13 +141,16 @@ router.get('/', authMiddleware, adminMiddleware, async (ctx) => {
         }
 
         const pageNum = Math.max(parseInt(page, 10) ?? 1, 1);
-        const pageSize = Math.max(parseInt(limit, 10) ?? 20, 1);
+        const normalizedPageSize = Math.max(
+            parseInt(String(pageSize ?? limit), 10) ?? 20,
+            1
+        );
 
         const total = await StudentIdChangeRequest.countDocuments(query);
         const requests = await StudentIdChangeRequest.find(query)
             .sort({ createdAt: -1 })
-            .skip((pageNum - 1) * pageSize)
-            .limit(pageSize)
+            .skip((pageNum - 1) * normalizedPageSize)
+            .limit(normalizedPageSize)
             .populate('userId', 'username name studentId')
             .lean();
 
@@ -151,13 +158,17 @@ router.get('/', authMiddleware, adminMiddleware, async (ctx) => {
             success: true,
             data: {
                 list: requests.map((item: any) => ({
-                    ...item,
-                    id: item._id,
-                    userName:
-                        getUserDisplayName(item.userId as any) ??
-                        String(item.userId?.studentId ?? ''),
+                    ...formatRouteDateTimes({
+                        ...item,
+                        id: item._id,
+                        userName:
+                            getUserDisplayName(item.userId as any) ??
+                            String(item.userId?.studentId ?? ''),
+                    }),
                 })),
                 total,
+                page: pageNum,
+                pageSize: normalizedPageSize,
             },
         };
     } catch (error: any) {
@@ -226,7 +237,9 @@ router.put('/:id/approve', authMiddleware, adminMiddleware, async (ctx) => {
             updatedBy: reviewerId,
             type: 0,
             title: 'Student ID change approved',
-            content: `Your student ID has been updated to ${request.newStudentId}.`,
+            content: `Your student ID has been updated to ${maskStudentId(
+                request.newStudentId
+            )}.`,
             relatedId: request._id.toString(),
         });
 

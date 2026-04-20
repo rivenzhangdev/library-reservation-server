@@ -9,6 +9,7 @@ import {
     saveBase64Image,
     normalizeUploadUrl,
 } from '../utils/upload';
+import { formatRouteDateTimes } from '../utils/route-time-serializer';
 // fs/path no longer needed; deletion handled in utils/upload
 
 const router = new Router({ prefix: '/api/uploads' });
@@ -39,9 +40,9 @@ function makeAbsoluteUrl(ctx: any, url: string) {
 router.get('/', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
-        const { page = 1, limit = 20 } = ctx.query as any;
+        const { page = 1, pageSize, limit = 20 } = ctx.query as any;
         const p = Math.max(1, parseInt(page as string));
-        const l = Math.max(1, parseInt(limit as string));
+        const l = Math.max(1, parseInt(String(pageSize ?? limit), 10));
         const total = await Upload.countDocuments();
         const list = await Upload.find()
             .sort({ createdAt: -1 })
@@ -50,17 +51,21 @@ router.get('/', authMiddleware, async (ctx) => {
             .populate('uploaderId', 'name username')
             .lean();
         const normalizedList = list.map((item: any) => ({
-            ...item,
-            url: makeAbsoluteUrl(
-                ctx,
-                normalizeUploadUrl(String(item.url ?? ''))
-            ),
-            uploaderName:
-                item.uploaderName ?? getUserDisplayName(item.uploaderId as any),
+            ...formatRouteDateTimes({
+                ...item,
+                id: String(item._id),
+                url: makeAbsoluteUrl(
+                    ctx,
+                    normalizeUploadUrl(String(item.url ?? ''))
+                ),
+                uploaderName:
+                    item.uploaderName ??
+                    getUserDisplayName(item.uploaderId as any),
+            }),
         }));
         ctx.body = {
             success: true,
-            data: { list: normalizedList, total, page: p, limit: l },
+            data: { list: normalizedList, total, page: p, pageSize: l },
         };
     } catch (e: any) {
         if (e.isCustom) throw e;
