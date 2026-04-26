@@ -14,6 +14,17 @@ function hasValue(value: any): boolean {
     return value !== undefined && value !== null && String(value).trim() !== '';
 }
 
+function isPlaceholderAuditName(value: any): boolean {
+    const normalized = String(value ?? '')
+        .trim()
+        .toLowerCase();
+    return (
+        normalized === 'bench user' ||
+        normalized === 'bench_user' ||
+        normalized === 'bench-user'
+    );
+}
+
 function toPublicId(value: any): string | undefined {
     if (value === undefined || value === null) return undefined;
 
@@ -144,7 +155,9 @@ function applyAuditNames(
     const obj = value as AnyRecord;
 
     for (const { idKey, nameKey } of AUDIT_FIELD_PAIRS) {
-        if (obj[nameKey]) continue;
+        if (hasValue(obj[nameKey]) && !isPlaceholderAuditName(obj[nameKey])) {
+            continue;
+        }
         const resolvedName = resolveNameFromValue(obj[idKey], userMap);
         if (resolvedName) obj[nameKey] = resolvedName;
     }

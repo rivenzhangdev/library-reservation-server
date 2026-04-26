@@ -3,7 +3,7 @@
     "info": {
         "title": "图书馆座位预约系统 API",
         "version": "1.0.0",
-        "description": "\n# 📚 图书馆座位预约系统 - 完整 API 文档\n\n## 🎯 系统简介\n基于 Node.js + Koa.js + TypeScript 的图书馆座位预约系统后端服务，为微信小程序提供 RESTful API。\n\n## 🌐 多环境配置\n\n### 环境说明\n系统支持四套环境配置，通过不同的 `.env` 文件切换：\n\n| 环境 | 文件 | 端口 | MySQL 数据库 | MongoDB 数据库 | 用途 |\n|------|------|------|--------|------|------|\n| **开发环境** | `.env.development` | 3000 | library_booking_dev | library_booking_dev | 本地开发调试 |\n| **测试环境** | `.env.test` | 3001 | library_booking_test | library_booking_test | 功能测试、接口测试 |\n| **UAT 环境** | `.env.uat` | 3002 | library_booking_uat | library_booking_uat | 用户验收测试 |\n| **生产环境** | `.env.production` | 3003 | library_booking | library_booking | 线上生产 |\n\n### 切换环境方法\n\n#### 方法一：使用切换脚本（推荐）\n```bash\n# 开发环境\nnode switch-env.js development\n\n# 测试环境\nnode switch-env.js test\n\n# UAT 环境\nnode switch-env.js uat\n\n# 生产环境\nnode switch-env.js production\n```\n\n#### 方法二：手动复制配置文件\n```bash\n# 开发环境\ncp .env.development .env\n\n# 测试环境\ncp .env.test .env\n\n# UAT 环境\ncp .env.uat .env\n\n# 生产环境\ncp .env.production .env\n```\n\n### 环境隔离说明\n- ✅ **数据库隔离**: 每个环境使用独立的 MySQL 和 MongoDB 数据库\n- ✅ **端口隔离**: 每个环境使用不同的服务端口，可并行运行\n- ✅ **配置隔离**: JWT 密钥、微信 AppID 等配置独立\n- ⚠️ **注意事项**: \n  - 初始化新环境时，需执行对应的 SQL 初始化脚本\n  - MongoDB 会在首次写入时自动创建数据库\n  - 切换环境后需重启开发服务器\n\n### 数据库初始化\n\n#### MySQL 数据库初始化\n```bash\n# 开发环境\nmysql -u root -p < database/init-dev.sql\n\n# 测试环境\nmysql -u root -p < database/init-test.sql\n\n# UAT 环境\nmysql -u root -p < database/init-uat.sql\n\n# 生产环境\nmysql -u root -p < database/init-production.sql\n```\n\n#### MongoDB 数据库初始化\nMongoDB 会在首次写入数据时自动创建数据库和集合。如需手动初始化（包含测试数据）：\n\n```bash\n# 初始化所有环境的 MongoDB 数据库\npnpm db:mongo:init\n\n# 或手动执行脚本\nnode database/init-mongodb.js\n```\n\n**初始化内容：**\n- ✅ **开发环境** (library_booking_dev): 包含测试用户、活动、通知等数据\n- ✅ **测试环境** (library_booking_test): 包含测试用户、活动、通知等数据\n- ✅ **UAT 环境** (library_booking_uat): 仅创建集合结构，无测试数据\n- ✅ **生产环境** (library_booking): 仅创建集合结构，无测试数据\n\n**初始化的集合：**\n- `users` - 用户信息\n- `notifications` - 通知消息\n- `activities` - 活动信息\n- `creditrecords` - 信用记录\n- `feedbacks` - 用户反馈\n\n**注意：** 如果 MongoDB 集合缺失，可以使用修复脚本：\n```bash\nnode database/fix-mongodb-collections.js\n```\n\n## 🔐 认证说明\n\n### JWT Token 认证流程\n1. 调用 `POST /api/auth/wxlogin` 接口，传入微信登录 code\n2. 获取返回的 token\n3. 后续请求在 Header 中携带：`Authorization: Bearer <token>`\n\n### Token 有效期\n- **默认有效期**: 7 天\n- **过期处理**: 返回错误码 2005，需重新登录\n\n## 📋 响应格式\n\n### 成功响应\n```json\n{\n  \"success\": true,\n  \"data\": { ... },\n  \"message\": \"操作成功\"\n}\n```\n\n### 错误响应\n```json\n{\n  \"success\": false,\n  \"error\": {\n    \"code\": 1001,  // 数字错误码\n    \"message\": \"参数错误\"\n  }\n}\n```\n\n### 常见数字错误码\n\n**重要说明：** 所有错误均返回 HTTP 200 状态码，通过 `code` 字段区分具体错误类型。\n\n| 错误码 | 说明 | HTTP 状态 |\n|--------|------|----------|\n| 0 | 成功 | 200 |\n| 1001 | 参数错误 | 200 |\n| 1002 | 未授权 | 200 |\n| 1003 | 禁止访问 | 200 |\n| 1004 | 资源不存在 | 200 |\n| 1005 | 服务器内部错误 | 200 |\n| 2001 | 微信 code 无效 | 200 |\n| 2002 | 微信 API 错误 | 200 |\n| 2004 | Token 无效 | 200 |\n| 2005 | Token 过期 | 200 |\n| 2006 | 学号已被绑定 | 200 |\n| 3001 | 用户不存在 | 200 |\n| 4001 | 座位不存在 | 200 |\n| 5001 | 预约冲突 | 200 |\n| 5005 | 预约不存在 | 200 |\n\n**错误处理原则：**\n- ✅ HTTP 状态码始终为 200\n- ✅ 通过 `success: false` 标识请求失败\n- ✅ 通过 `error.code` 获取具体错误码（数字）\n- ✅ 通过 `error.message` 获取错误描述\n\n完整错误码定义见：`src/utils/error-codes.ts`\n\n## 🔢 枚举值规范\n\n服务端所有状态、类型字段均使用**数字类型**返回，前端需自行映射为文本。\n\n### 座位状态枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 可用 |\n| 1 | 维修中 |\n\n### 座位类型枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 单人间 |\n| 1 | 双人间 |\n| 2 | 多人间 |\n\n### 时间段枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 上午 |\n| 1 | 下午 |\n| 2 | 晚上 |\n\n### 预约状态枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 待使用 |\n| 1 | 进行中 |\n| 2 | 已完成 |\n| 3 | 已取消 |\n| 4 | 违约 |\n\n### 通知类型枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 系统通知 |\n| 1 | 预约提醒 |\n| 2 | 签到提醒 |\n| 3 | 违约通知 |\n| 4 | 活动通知 |\n\n### 活动报名状态枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 待审核 |\n| 1 | 已通过 |\n| 2 | 已拒绝 |\n| 3 | 已取消 |\n    "
+        "description": "\n# 📚 图书馆座位预约系统 - 完整 API 文档\n\n## 🎯 系统简介\n基于 Node.js + Koa.js + TypeScript 的图书馆座位预约系统后端服务，为微信小程序提供 RESTful API。\n\n## 🌐 多环境配置\n\n### 环境说明\n系统支持四套环境配置，通过不同的 `.env` 文件切换：\n\n| 环境 | 文件 | 端口 | MySQL 数据库 | MongoDB 数据库 | 用途 |\n|------|------|------|--------|------|------|\n| **开发环境** | `.env.development` | 3000 | library_booking_dev | library_booking_dev | 本地开发调试 |\n| **测试环境** | `.env.test` | 3001 | library_booking_test | library_booking_test | 功能测试、接口测试 |\n| **UAT 环境** | `.env.uat` | 3002 | library_booking_uat | library_booking_uat | 用户验收测试 |\n| **生产环境** | `.env.production` | 3003 | library_booking | library_booking | 线上生产 |\n\n### 切换环境方法\n\n#### 方法一：使用切换脚本（推荐）\n```bash\n# 开发环境\nnode switch-env.js development\n\n# 测试环境\nnode switch-env.js test\n\n# UAT 环境\nnode switch-env.js uat\n\n# 生产环境\nnode switch-env.js production\n```\n\n#### 方法二：手动复制配置文件\n```bash\n# 开发环境\ncp .env.development .env\n\n# 测试环境\ncp .env.test .env\n\n# UAT 环境\ncp .env.uat .env\n\n# 生产环境\ncp .env.production .env\n```\n\n### 环境隔离说明\n- ✅ **数据库隔离**: 每个环境使用独立的 MySQL 和 MongoDB 数据库\n- ✅ **端口隔离**: 每个环境使用不同的服务端口，可并行运行\n- ✅ **配置隔离**: JWT 密钥、微信 AppID 等配置独立\n- ⚠️ **注意事项**: \n  - 初始化新环境时，需执行对应的 SQL 初始化脚本\n  - MongoDB 会在首次写入时自动创建数据库\n  - 切换环境后需重启开发服务器\n\n### 数据库初始化\n\n#### MySQL 数据库初始化\n```bash\n# 开发环境\nmysql -u root -p < database/init-dev.sql\n\n# 测试环境\nmysql -u root -p < database/init-test.sql\n\n# UAT 环境\nmysql -u root -p < database/init-uat.sql\n\n# 生产环境\nmysql -u root -p < database/init-production.sql\n```\n\n#### MongoDB 数据库初始化\nMongoDB 会在首次写入数据时自动创建数据库和集合。如需手动初始化（最小化模式）：\n\n```bash\n# 初始化所有环境的 MongoDB 数据库\npnpm db:mongo:init\n\n# 或手动执行脚本\nnode tools/init-mongodb.js\n```\n\n**初始化内容：**\n- ✅ **开发环境** (library_booking_dev): 创建集合并确保默认超级管理员\n- ✅ **测试环境** (library_booking_test): 创建集合并确保默认超级管理员\n- ✅ **UAT 环境** (library_booking_uat): 仅保留默认超级管理员\n- ✅ **生产环境** (library_booking): 仅保留默认超级管理员\n\n**初始化的集合：**\n- `users` - 用户信息\n- `notifications` - 通知消息\n- `activities` - 活动信息\n- `creditrecords` - 信用记录\n- `feedbacks` - 用户反馈\n\n**注意：** 如果 MongoDB 集合缺失，可以使用修复脚本：\n```bash\nnode database/fix-mongodb-collections.js\n```\n\n## 🔐 认证说明\n\n### JWT Token 认证流程\n1. 调用 `POST /api/auth/wxlogin` 接口，传入微信登录 code\n2. 获取返回的 token\n3. 后续请求在 Header 中携带：`Authorization: Bearer <token>`\n\n### Token 有效期\n- **默认有效期**: 7 天\n- **过期处理**: 返回错误码 2005，需重新登录\n\n## 📋 响应格式\n\n### 成功响应\n```json\n{\n  \"success\": true,\n  \"data\": { ... },\n  \"message\": \"操作成功\"\n}\n```\n\n### 错误响应\n```json\n{\n  \"success\": false,\n  \"error\": {\n    \"code\": 1001,  // 数字错误码\n    \"message\": \"参数错误\"\n  }\n}\n```\n\n### 常见数字错误码\n\n**重要说明：** 所有错误均返回 HTTP 200 状态码，通过 `code` 字段区分具体错误类型。\n\n| 错误码 | 说明 | HTTP 状态 |\n|--------|------|----------|\n| 0 | 成功 | 200 |\n| 1001 | 参数错误 | 200 |\n| 1002 | 未授权 | 200 |\n| 1003 | 禁止访问 | 200 |\n| 1004 | 资源不存在 | 200 |\n| 1005 | 服务器内部错误 | 200 |\n| 2001 | 微信 code 无效 | 200 |\n| 2002 | 微信 API 错误 | 200 |\n| 2004 | Token 无效 | 200 |\n| 2005 | Token 过期 | 200 |\n| 2006 | 学号已被绑定 | 200 |\n| 3001 | 用户不存在 | 200 |\n| 4001 | 座位不存在 | 200 |\n| 5001 | 预约冲突 | 200 |\n| 5005 | 预约不存在 | 200 |\n\n**错误处理原则：**\n- ✅ HTTP 状态码始终为 200\n- ✅ 通过 `success: false` 标识请求失败\n- ✅ 通过 `error.code` 获取具体错误码（数字）\n- ✅ 通过 `error.message` 获取错误描述\n\n完整错误码定义见：`src/utils/error-codes.ts`\n\n## 🔢 枚举值规范\n\n服务端所有状态、类型字段均使用**数字类型**返回，前端需自行映射为文本。\n\n### 座位状态枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 可用 |\n| 1 | 维修中 |\n\n### 座位类型枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 单人间 |\n| 1 | 双人间 |\n| 2 | 多人间 |\n\n### 时间段枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 上午 |\n| 1 | 下午 |\n| 2 | 晚上 |\n\n### 预约状态枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 待使用 |\n| 1 | 进行中 |\n| 2 | 已完成 |\n| 3 | 已取消 |\n| 4 | 违约 |\n\n### 通知类型枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 系统通知 |\n| 1 | 预约提醒 |\n| 2 | 签到提醒 |\n| 3 | 违约通知 |\n| 4 | 活动通知 |\n\n### 活动报名状态枚举\n| 值 | 含义 |\n|----|------|\n| 0 | 待审核 |\n| 1 | 已通过 |\n| 2 | 已拒绝 |\n| 3 | 已取消 |\n    "
     },
     "servers": [
         {
@@ -1034,7 +1034,7 @@
                                         "data": {
                                             "type": "object",
                                             "properties": {
-                                                "bookings": {
+                                                "list": {
                                                     "type": "array",
                                                     "items": {
                                                         "type": "object",
@@ -1082,6 +1082,25 @@
                                                             },
                                                             "status": {
                                                                 "type": "integer"
+                                                            },
+                                                            "renewableTimeSlots": {
+                                                                "type": "array",
+                                                                "items": {
+                                                                    "type": "integer"
+                                                                },
+                                                                "description": "可续约目标时段（按时序）"
+                                                            },
+                                                            "canRenew": {
+                                                                "type": "boolean",
+                                                                "description": "当前是否可续约"
+                                                            },
+                                                            "renewalBlockedReason": {
+                                                                "type": "string",
+                                                                "description": "不可续约原因：advance_window_not_reached/no_later_time_slot/renewal_limit_reached/slots_unavailable_or_conflict 等"
+                                                            },
+                                                            "renewalAdvanceDays": {
+                                                                "type": "integer",
+                                                                "description": "续约提前天数配置（renewal.advanceDays）"
                                                             }
                                                         }
                                                     }
@@ -1092,7 +1111,7 @@
                                                 "page": {
                                                     "type": "integer"
                                                 },
-                                                "limit": {
+                                                "pageSize": {
                                                     "type": "integer"
                                                 }
                                             }
@@ -1327,6 +1346,9 @@
                 "responses": {
                     "200": {
                         "description": "续约成功"
+                    },
+                    "400": {
+                        "description": "续约失败（参数错误、未到续约窗口、超限、目标时段不可用或冲突）"
                     },
                     "404": {
                         "description": "预约不存在"

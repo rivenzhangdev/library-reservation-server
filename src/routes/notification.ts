@@ -429,17 +429,18 @@ router.post('/read/:id', authMiddleware, async (ctx) => {
 router.post('/read-all', authMiddleware, async (ctx) => {
     try {
         const currentUser: any = (ctx as any).state.user || {};
-        const isAdmin = currentUser.role === Roles.ADMIN;
 
-        await Notification.updateMany(
-            isAdmin
-                ? { isRead: false }
-                : { userId: currentUser.id, isRead: false },
+        const result: any = await Notification.updateMany(
+            { userId: currentUser.id, isRead: false },
             { $set: { isRead: true } }
         );
 
         ctx.body = {
             success: true,
+            data: {
+                matched: result?.matchedCount ?? result?.n ?? 0,
+                modified: result?.modifiedCount ?? result?.nModified ?? 0,
+            },
         };
     } catch (error: any) {
         if (error.isCustom) throw error;

@@ -1,6 +1,5 @@
 import { Activity, CreditRecord, User } from '../models/mongodb';
 import { ActivityStatus, CreditType } from '../models/mysql/types';
-import { buildUpdatedBy } from '../utils/audit';
 import {
     getUserDisplayName,
     getUserDisplayNameFromMap,
@@ -21,6 +20,73 @@ export function resolveUserDisplayName(
     return getUserDisplayNameFromMap(value, userMap);
 }
 
+function resolveActivityStatusByTime(activity: any, now = new Date()) {
+    if (!activity) return undefined;
+    const startTime = new Date(activity.startTime);
+    const endTime = new Date(activity.endTime);
+
+    if (Number.isNaN(startTime.getTime()) || Number.isNaN(endTime.getTime())) {
+        return activity.status;
+    }
+
+    if (now >= endTime) {
+        return ActivityStatus.ENDED;
+    }
+    if (now >= startTime) {
+        return ActivityStatus.ONGOING;
+    }
+    return ActivityStatus.UPCOMING;
+}
+
+export async function refreshActivityStatuses(now = new Date()) {
+    await Activity.updateMany(
+        {
+            status: ActivityStatus.UPCOMING,
+            startTime: { $lte: now },
+            endTime: { $gt: now },
+        },
+        { $set: { status: ActivityStatus.ONGOING } }
+    );
+
+    await Activity.updateMany(
+        {
+            status: { $in: [ActivityStatus.UPCOMING, ActivityStatus.ONGOING] },
+            endTime: { $lte: now },
+        },
+        { $set: { status: ActivityStatus.ENDED } }
+    );
+}
+
+export async function refreshActivityStatusesSafely(now = new Date()) {
+    await refreshActivityStatuses(now);
+}
+
+export function startActivityStatusRefreshTask(intervalMinutes = 1) {
+    const parsedInterval = Number(intervalMinutes);
+    if (!Number.isFinite(parsedInterval) || parsedInterval <= 0) {
+        return null;
+    }
+
+    const intervalMs = Math.max(1000, Math.floor(parsedInterval * 60 * 1000));
+    const timer = setInterval(() => {
+        void refreshActivityStatusesSafely().catch((error) => {
+            console.error('Failed to refresh activity statuses:', error);
+        });
+    }, intervalMs);
+
+    return timer;
+}
+
+async function ensureActivityStatusCurrent(activity: any, now = new Date()) {
+    const expectedStatus = resolveActivityStatusByTime(activity, now);
+    if (expectedStatus === undefined) return activity;
+    if (activity.status === expectedStatus) return activity;
+
+    activity.status = expectedStatus;
+    await activity.save();
+    return activity;
+}
+
 function normalizeActivity(activity: any, userMap: Record<string, any>) {
     return {
         ...activity,
@@ -31,6 +97,7 @@ function normalizeActivity(activity: any, userMap: Record<string, any>) {
 }
 
 export async function listActivities() {
+    await refreshActivityStatuses();
     const activities = await Activity.find()
         .populate('createdBy', 'name username')
         .populate('updatedBy', 'name username')
@@ -50,6 +117,7 @@ export async function listActivitiesAdmin(params: {
     startTime?: string;
     endTime?: string;
 }) {
+    await refreshActivityStatuses();
     const page = Math.max(1, Number(params?.page || 1));
     const pageSize = Math.max(1, Number(params?.pageSize || 20));
 
@@ -113,8 +181,14 @@ export async function listActivitiesAdmin(params: {
 }
 
 export async function getActivityById(activityId: string) {
-    const activity = await Activity.findById(activityId).lean();
-    if (!activity) return null;
+    const activityDoc = await Activity.findById(activityId);
+    if (!activityDoc) return null;
+    await ensureActivityStatusCurrent(activityDoc);
+
+    const activity =
+        typeof (activityDoc as any).toObject === 'function'
+            ? (activityDoc as any).toObject()
+            : activityDoc;
 
     const populated = await Activity.findById(activityId)
         .populate('createdBy', 'name username')
@@ -129,7 +203,7 @@ export async function getActivityById(activityId: string) {
     };
 }
 
-function ensureActivityExists(activity: any) {
+function ensureActivityExists(activity: any): asserts activity {
     if (!activity) {
         throw new CustomError(
             'Activity not found',
@@ -139,16 +213,38 @@ function ensureActivityExists(activity: any) {
 }
 
 export async function joinActivity(activityId: string, userId: string) {
+    const now = new Date();
+    await refreshActivityStatuses(now);
+
+    const updated = await Activity.findOneAndUpdate(
+        {
+            _id: activityId,
+            status: ActivityStatus.UPCOMING,
+            startTime: { $gt: now },
+            endTime: { $gt: now },
+            participants: { $ne: userId },
+            $expr: {
+                $lt: [
+                    { $size: { $ifNull: ['$participants', []] } },
+                    '$maxParticipants',
+                ],
+            },
+        },
+        {
+            $addToSet: { participants: userId },
+        },
+        {
+            new: true,
+        }
+    );
+
+    if (updated) {
+        return;
+    }
+
     const activity = await Activity.findById(activityId);
     ensureActivityExists(activity);
-
-    if (activity.status !== ActivityStatus.UPCOMING) {
-        const errorCode =
-            activity.status === ActivityStatus.ONGOING
-                ? ErrorCodes.ACTIVITY_IN_PROGRESS
-                : ErrorCodes.ACTIVITY_ENDED;
-        throw new CustomError('Activity is ongoing or ended', errorCode);
-    }
+    await ensureActivityStatusCurrent(activity, now);
 
     const hasJoined = Array.isArray(activity.participants)
         ? activity.participants.some(
@@ -162,12 +258,15 @@ export async function joinActivity(activityId: string, userId: string) {
         );
     }
 
-    if (activity.participants.length >= activity.maxParticipants) {
-        throw new CustomError('Activity is full', ErrorCodes.ACTIVITY_FULL);
+    if (activity.status !== ActivityStatus.UPCOMING) {
+        const errorCode =
+            activity.status === ActivityStatus.ONGOING
+                ? ErrorCodes.ACTIVITY_IN_PROGRESS
+                : ErrorCodes.ACTIVITY_ENDED;
+        throw new CustomError('Activity is ongoing or ended', errorCode);
     }
 
-    activity.participants.push(userId);
-    await activity.save();
+    throw new CustomError('Activity is full', ErrorCodes.ACTIVITY_FULL);
 }
 
 export async function cancelActivityRegistration(
@@ -176,6 +275,7 @@ export async function cancelActivityRegistration(
 ) {
     const activity = await Activity.findById(activityId);
     ensureActivityExists(activity);
+    await ensureActivityStatusCurrent(activity);
 
     const participantIndex = Array.isArray(activity.participants)
         ? activity.participants.findIndex(
@@ -197,6 +297,7 @@ export async function cancelActivityRegistration(
 export async function checkinActivity(activityId: string, userId: string) {
     const activity = await Activity.findById(activityId);
     ensureActivityExists(activity);
+    await ensureActivityStatusCurrent(activity);
 
     if (activity.status !== ActivityStatus.ONGOING) {
         const errorCode =
@@ -218,8 +319,8 @@ export async function checkinActivity(activityId: string, userId: string) {
         );
     }
 
-    const checkedIn = Array.isArray(activity.checkedIn)
-        ? activity.checkedIn
+    const checkedIn: any[] = Array.isArray(activity.checkedIn)
+        ? [...activity.checkedIn]
         : [];
     const alreadyCheckedIn = checkedIn.some(
         (participant: any) => String(participant) === String(userId)
@@ -228,7 +329,8 @@ export async function checkinActivity(activityId: string, userId: string) {
         return { alreadyCheckedIn: true };
     }
 
-    activity.checkedIn = checkedIn.concat(userId);
+    activity.checkedIn = checkedIn;
+    activity.checkedIn.push(userId as any);
     await activity.save();
 
     await CreditRecord.create({
@@ -245,6 +347,7 @@ export async function checkinActivity(activityId: string, userId: string) {
 export async function checkoutActivity(activityId: string, userId: string) {
     const activity = await Activity.findById(activityId);
     ensureActivityExists(activity);
+    await ensureActivityStatusCurrent(activity);
     if (activity.status === ActivityStatus.UPCOMING) {
         throw new CustomError(
             'Activity is not started yet',
@@ -264,8 +367,8 @@ export async function checkoutActivity(activityId: string, userId: string) {
         );
     }
 
-    const checkedIn = Array.isArray(activity.checkedIn)
-        ? activity.checkedIn
+    const checkedIn: any[] = Array.isArray(activity.checkedIn)
+        ? [...activity.checkedIn]
         : [];
     const alreadyCheckedIn = checkedIn.some(
         (participant: any) => String(participant) === String(userId)
@@ -277,8 +380,8 @@ export async function checkoutActivity(activityId: string, userId: string) {
         );
     }
 
-    const checkedOut = Array.isArray(activity.checkedOut)
-        ? activity.checkedOut
+    const checkedOut: any[] = Array.isArray(activity.checkedOut)
+        ? [...activity.checkedOut]
         : [];
     const alreadyCheckedOut = checkedOut.some(
         (participant: any) => String(participant) === String(userId)
@@ -287,7 +390,8 @@ export async function checkoutActivity(activityId: string, userId: string) {
         return { alreadyCheckedOut: true };
     }
 
-    activity.checkedOut = checkedOut.concat(userId);
+    activity.checkedOut = checkedOut;
+    activity.checkedOut.push(userId as any);
     activity.checkedOutAt = new Date();
     await activity.save();
 
@@ -337,7 +441,7 @@ export async function expireActivityIfNeeded(
         ? activity.checkedOut.map((item: any) => String(item))
         : [];
     const missedCheckoutUserIds = checkedInList.filter(
-        (userId) => !checkedOutList.includes(userId)
+        (userId: string) => !checkedOutList.includes(userId)
     );
 
     if (missedCheckoutUserIds.length === 0) {
@@ -394,6 +498,9 @@ export const activityRouteDependencies = {
     checkoutActivity,
     expireActivityIfNeeded,
     markAllExpiredActivities,
+    refreshActivityStatuses,
+    refreshActivityStatusesSafely,
+    startActivityStatusRefreshTask,
     Activity,
     User,
 };

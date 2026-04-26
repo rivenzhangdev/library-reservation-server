@@ -22,6 +22,27 @@ async function initializeDatabase() {
         password: process.env.DB_MYSQL_PASSWORD ?? '',
     };
 
+    const env = String(process.env.NODE_ENV || 'development')
+        .trim()
+        .toLowerCase();
+    const databaseName =
+        process.env.DB_MYSQL_DATABASE ||
+        (env === 'production'
+            ? process.env.DB_MYSQL_DATABASE_PROD ?? 'library_booking'
+            : env === 'uat'
+              ? process.env.DB_MYSQL_DATABASE_UAT ?? 'library_booking_uat'
+              : env === 'test'
+                ? process.env.DB_MYSQL_DATABASE_TEST ?? 'library_booking_test'
+                : process.env.DB_MYSQL_DATABASE_DEV ?? 'library_booking_dev');
+    const envInitSqlFile =
+        env === 'production'
+            ? 'init-production.sql'
+            : env === 'uat'
+              ? 'init-uat.sql'
+              : env === 'test'
+                ? 'init-production.sql'
+                : 'init-dev.sql';
+
     let connection;
 
     try {
@@ -36,20 +57,24 @@ async function initializeDatabase() {
         console.log('✓ MySQL 服务器连接成功\n');
 
         // 2. 创建数据库
-        console.log('[2/5] 创建 database 数据库...');
+        console.log(`[2/5] 创建数据库 ${databaseName}...`);
         await connection.query(
-            `CREATE DATABASE IF NOT EXISTS library_booking CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+            `CREATE DATABASE IF NOT EXISTS \`${databaseName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
         );
         console.log('✓ 数据库创建成功\n');
 
-        // 3. 切换到 library_booking 数据库
-        console.log('[3/5] 切换到 library_booking 数据库...');
-        await connection.changeUser({ database: 'library_booking' });
+        // 3. 切换到数据库
+        console.log(`[3/5] 切换到数据库 ${databaseName}...`);
+        await connection.changeUser({ database: databaseName });
         console.log('✓ 数据库切换成功\n');
 
         // 4. 读取并执行初始化 SQL 脚本
         console.log('[4/5] 执行初始化脚本...');
-        const initSqlPath = path.join(__dirname, '../../database/init.sql');
+        const initSqlPath = path.join(
+            __dirname,
+            '../../database',
+            envInitSqlFile
+        );
 
         if (!fs.existsSync(initSqlPath)) {
             throw new Error(`初始化文件不存在：${initSqlPath}`);

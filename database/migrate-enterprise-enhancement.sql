@@ -25,11 +25,18 @@ INSERT IGNORE INTO booking_rule_config (rule_key, rule_value, description, categ
   ('max_booking_per_day', '3', '每人每天最大预约次数', 'booking', TRUE),
   ('max_booking_duration_hours', '4', '单次预约最大时长（小时）', 'booking', TRUE),
   ('advance_booking_days', '7', '可提前预约天数', 'booking', TRUE),
-  ('cancel_before_minutes', '30', '预约开始前 N 分钟内不可取消', 'cancel', TRUE),
-  ('late_cancel_penalty_credit', '5', '迟到取消扣除信用分', 'cancel', TRUE),
-  ('max_renewal_count', '2', '每个预约最大续约次数', 'renewal', TRUE),
+  ('cancel_before_minutes', '30', '预约开始前 N 分钟内视为临近取消；若迟取消扣分大于 0，则允许取消并扣分，否则禁止取消', 'cancel', TRUE),
+  ('late_cancel_penalty_credit', '5', '临近开始时取消所扣信用分（设为 0 表示窗口内禁止取消）', 'cancel', TRUE),
+  ('renewal.maxExtraSlots', '2', '每个预约最大续约次数', 'renewal', TRUE),
+  ('renewal.advanceDays', '0', '可提前续约天数（0 表示仅预约当天可续约）', 'renewal', TRUE),
+  ('change_request.maxPerBooking', '3', '每条预约可提交的变更申请总次数上限', 'general', TRUE),
   ('renewal_extend_minutes', '60', '续约延长分钟数', 'renewal', TRUE),
   ('checkin_window_minutes', '15', '签到窗口期（分钟）', 'general', TRUE);
+
+-- 历史 key 兼容：将 max_renewal_count 收敛为 renewal.maxExtraSlots
+UPDATE booking_rule_config
+SET rule_key = 'renewal.maxExtraSlots'
+WHERE rule_key = 'max_renewal_count';
 
 -- ============================================================
 -- 2. booking_change_requests 表 (预约变更申请)

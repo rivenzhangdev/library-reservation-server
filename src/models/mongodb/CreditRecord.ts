@@ -46,6 +46,12 @@ creditRecordSchema.pre('save', function (next) {
 
 // 创建索引
 creditRecordSchema.index({ userId: 1, date: -1 });
+// 防止同一预约同一原因重复写入（竞态保护）
+// 注意：若数据库中已有重复数据，需先运行 scripts/fix-duplicate-violation-records.js 清理后此索引才能创建成功
+creditRecordSchema.index(
+    { bookingId: 1, reason: 1 },
+    { unique: true, sparse: true, name: 'idx_credit_booking_reason_unique' }
+);
 
 const CreditRecord = mongoose.model<ICreditRecord>(
     'CreditRecord',

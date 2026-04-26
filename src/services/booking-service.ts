@@ -2,6 +2,7 @@ import { Op, Transaction } from 'sequelize';
 import sequelize from '../database/mysql';
 import { Notification, User, CreditRecord } from '../models/mongodb';
 import { Booking, Seat, TimeSlotStatus } from '../models/mysql';
+import { BookingRuleConfig } from '../models/mysql';
 import { CustomError } from '../middleware/error';
 import {
     BookingStatus,
@@ -20,6 +21,7 @@ import { sendWechatSubscribeMessage } from '../utils/wechat';
 import { getUserDisplayName } from '../utils/user-display';
 import { getBookingRuleNumber } from '../routes/booking-rules';
 import {
+    getChronologicalTimeSlots,
     getTimeSlotConfigItems,
     resolveTimeSlot,
 } from '../utils/time-slot-config';
@@ -186,21 +188,7 @@ export async function ensureViolationCreditRecord(
 ) {
     if (!booking?.id || !booking.userId) return;
 
-    const existingRecord = await CreditRecord.findOne({
-        bookingId: booking.id,
-        type: 1,
-    }).lean();
-    if (existingRecord) return;
-
-    const user = await User.findById(booking.userId);
-    if (!user) return;
-
     const { violationDeductPoints } = await getCreditRuleValues();
-    user.creditScore = Math.max(
-        0,
-        (user.creditScore ?? 100) - violationDeductPoints
-    );
-    await user.save();
 
     const violationRecord: any = {
         userId: booking.userId,
@@ -213,25 +201,68 @@ export async function ensureViolationCreditRecord(
         violationRecord.updatedBy = operatorId;
     }
 
-    await CreditRecord.create(violationRecord);
+    // 原子 upsert：只有真正新插入时才扣分，防止并发重复写入
+    let inserted = false;
+    try {
+        const existing = await CreditRecord.findOneAndUpdate(
+            { bookingId: booking.id, reason: CreditReasons.VIOLATION_PENALTY },
+            { $setOnInsert: violationRecord },
+            { upsert: true, new: false }
+        );
+        // findOneAndUpdate with new:false returns null when upsert creates a new doc
+        inserted = existing === null;
+    } catch (err: any) {
+        // 唯一索引冲突 (code 11000)：说明记录已存在，跳过
+        if (err?.code === 11000) return;
+        throw err;
+    }
+
+    if (!inserted) return;
+
+    const user = await User.findById(booking.userId);
+    if (!user) return;
+
+    user.creditScore = Math.max(
+        0,
+        (user.creditScore ?? 100) - violationDeductPoints
+    );
+    await user.save();
 }
 
 export async function releaseBookingTimeSlot(
     booking: any,
     transaction?: Transaction
 ) {
-    if (!booking?.seatId || !booking.date) return;
+    if (!booking) return;
+    const bookingId = booking.id ?? booking.bookingId;
+    if (!bookingId && (!booking?.seatId || !booking.date)) return;
+
+    const where = bookingId
+        ? { bookingId }
+        : {
+              seatId: booking.seatId,
+              date: booking.date,
+              timeSlot: booking.timeSlot,
+          };
+
+    const releasedRows = await TimeSlotStatus.findAll({
+        where,
+        attributes: ['seatId', 'date', 'timeSlot'],
+        transaction,
+        raw: true,
+    });
+
     await TimeSlotStatus.update(
         { status: TimeSlotStatusValue.AVAILABLE, bookingId: undefined },
         {
-            where: {
-                seatId: booking.seatId,
-                date: booking.date,
-                timeSlot: booking.timeSlot,
-            },
+            where,
             transaction,
         }
     );
+
+    if (!transaction && releasedRows.length > 0) {
+        // 保留读取释放记录，便于后续扩展释放后钩子逻辑。
+    }
 }
 
 export async function performBookingCheckin(
@@ -240,26 +271,54 @@ export async function performBookingCheckin(
     creditRecordModel = CreditRecord
 ): Promise<void> {
     if (!booking) {
-        throw new Error('Booking not found');
+        throw new CustomError(
+            'Booking not found',
+            ErrorCodes.BOOKING_NOT_FOUND
+        );
     }
     if (booking.status !== BookingStatus.UPCOMING) {
-        throw new Error('Check-in is not allowed for this booking');
-    }
-    if (!(await isCheckinAllowed(booking))) {
-        throw new Error(
-            `Check-in is only allowed within ${CHECKIN_WINDOW_MINUTES} minutes before start and before the end time`
+        throw new CustomError(
+            'Check-in is not allowed for this booking',
+            ErrorCodes.CHECKIN_ERROR
         );
+    }
+    const checkinWindowRule = await BookingRuleConfig.findOne({
+        where: { ruleKey: 'checkin_window_minutes' },
+    });
+    const checkinWindowEnabled = checkinWindowRule
+        ? Boolean(checkinWindowRule.enabled)
+        : true;
+
+    if (checkinWindowEnabled) {
+        const checkinWindowMinutes = await getBookingRuleNumber(
+            'checkin_window_minutes',
+            CHECKIN_WINDOW_MINUTES
+        );
+        if (!(await isCheckinAllowed(booking, checkinWindowMinutes))) {
+            throw new CustomError(
+                `Check-in is only allowed within ${checkinWindowMinutes} minutes before start and before the end time`,
+                ErrorCodes.CHECKIN_ERROR
+            );
+        }
+    } else {
+        if (!isSameDay(String(booking.date), new Date())) {
+            throw new CustomError(
+                'Check-in is only allowed on booking date',
+                ErrorCodes.CHECKIN_ERROR
+            );
+        }
+        const endMinutes = await getBookingEndMinutes(booking);
+        const now = new Date();
+        const nowMinutes = now.getHours() * 60 + now.getMinutes();
+        if (endMinutes === undefined || nowMinutes > endMinutes) {
+            throw new CustomError(
+                'Check-in is not allowed after booking end time',
+                ErrorCodes.CHECKIN_ERROR
+            );
+        }
     }
     await booking.update({
         status: BookingStatus.ONGOING,
-    });
-    await creditRecordModel.create({
-        userId: booking.userId,
-        bookingId: booking.id,
-        type: 0,
-        points: 0,
-        reason: CreditReasons.BOOKING_CHECKIN,
-        updatedBy: userId,
     });
 }
 
@@ -270,16 +329,19 @@ export async function performBookingCheckout(
     expireFn = expireBookingIfNeeded
 ): Promise<void> {
     if (!booking) {
-        throw new Error('Booking not found');
+        throw new CustomError(
+            'Booking not found',
+            ErrorCodes.BOOKING_NOT_FOUND
+        );
     }
     if (booking.status !== BookingStatus.ONGOING) {
-        throw new Error('Check-out is not allowed for this booking');
+        throw new CustomError(
+            'Check-out is not allowed for this booking',
+            ErrorCodes.CHECKIN_ERROR
+        );
     }
     if (await isBookingOverdue(booking)) {
         await expireFn(booking);
-        throw new Error(
-            'Booking has expired and is marked as violated; check-out is not allowed'
-        );
     }
     await booking.update({
         status: BookingStatus.COMPLETED,
@@ -392,6 +454,32 @@ export async function buildRenewBookingData(
     };
 }
 
+export async function getRenewalAdvanceDays(): Promise<number> {
+    const rawValue = await getBookingRuleNumber('renewal.advanceDays', 0);
+    return Math.max(0, Math.floor(Number(rawValue) || 0));
+}
+
+export async function isBookingWithinRenewalWindow(
+    bookingDateInput: any,
+    now: Date = new Date()
+): Promise<boolean> {
+    const bookingDate = parseLocalDate(String(bookingDateInput));
+    if (!bookingDate) return false;
+
+    const renewalAdvanceDays = await getRenewalAdvanceDays();
+    const today = new Date(now);
+    today.setHours(0, 0, 0, 0);
+
+    const targetDate = new Date(bookingDate);
+    targetDate.setHours(0, 0, 0, 0);
+
+    const dayDiff = Math.round(
+        (targetDate.getTime() - today.getTime()) / (24 * 60 * 60 * 1000)
+    );
+
+    return dayDiff >= 0 && dayDiff <= renewalAdvanceDays;
+}
+
 export async function performBookingRenew(
     booking: any,
     requestTimeSlot: any,
@@ -412,6 +500,7 @@ export async function performBookingRenew(
     const resolveTimeSlotFn = options.resolveTimeSlot ?? resolveTimeSlot;
     const validateFn =
         options.validateBookingTimeRange ?? validateBookingTimeRange;
+    const bookingModel = options.bookingModel ?? Booking;
     const timeSlotStatusModel = options.timeSlotStatusModel ?? TimeSlotStatus;
     const transactionProvider =
         options.transactionProvider ??
@@ -428,15 +517,39 @@ export async function performBookingRenew(
     if (currentEndSlot === undefined) {
         throw new Error('Cannot determine current booking end slot');
     }
-    if (normalizedTimeSlot === currentEndSlot) {
+    const slotConfigs = await getTimeSlotConfigItems();
+    const orderedTimeSlots = getChronologicalTimeSlots(slotConfigs)
+        .map((item) => Number(item.timeSlot))
+        .filter((slot) => Number.isInteger(slot))
+        .filter((slot, index, array) => array.indexOf(slot) === index);
+    const timeSlotIndexMap = new Map<number, number>(
+        orderedTimeSlots.map((slot, index) => [slot, index])
+    );
+
+    const currentEndSlotIndex = timeSlotIndexMap.get(Number(currentEndSlot));
+    const targetSlotIndex = timeSlotIndexMap.get(Number(normalizedTimeSlot));
+    if (currentEndSlotIndex === undefined || targetSlotIndex === undefined) {
+        throw new Error('Invalid timeSlot');
+    }
+    if (targetSlotIndex === currentEndSlotIndex) {
         throw new Error('Cannot renew to the same time slot');
     }
-    if (normalizedTimeSlot < currentEndSlot) {
+    if (targetSlotIndex < currentEndSlotIndex) {
         throw new Error('Renewal must move to a later time slot');
     }
     if (booking.status !== BookingStatus.UPCOMING) {
         throw new CustomError(
             'Only upcoming bookings can be renewed',
+            ErrorCodes.RENEW_BOOKING_ERROR
+        );
+    }
+
+    const withinRenewalWindow = await isBookingWithinRenewalWindow(
+        booking.date
+    );
+    if (!withinRenewalWindow) {
+        throw new CustomError(
+            'Renewal is not allowed before the configured renewal window',
             ErrorCodes.RENEW_BOOKING_ERROR
         );
     }
@@ -448,12 +561,51 @@ export async function performBookingRenew(
         },
     });
     const existingExtraSlots = Math.max(0, existingStatuses.length - 1);
-    const newExtraSlots = normalizedTimeSlot - currentEndSlot;
+    const newExtraSlots = targetSlotIndex - currentEndSlotIndex;
     if (existingExtraSlots + newExtraSlots > renewalLimit) {
         throw new CustomError(
             'Renewal limit exceeded',
             ErrorCodes.RENEWAL_LIMIT_EXCEEDED
         );
+    }
+
+    const currentStartSlot = Number(booking.timeSlot);
+    const currentRangeStartIndex =
+        timeSlotIndexMap.get(currentStartSlot) ?? currentEndSlotIndex;
+
+    const sameUserBookings = await bookingModel.findAll({
+        where: {
+            userId: booking.userId,
+            date: booking.date,
+            id: {
+                [Op.ne]: booking.id,
+            },
+            status: {
+                [Op.in]: [BookingStatus.UPCOMING, BookingStatus.ONGOING],
+            },
+        },
+    });
+
+    for (const otherBooking of sameUserBookings as any[]) {
+        const otherStartSlot = Number(otherBooking.timeSlot);
+        const otherStartSlotIndex = timeSlotIndexMap.get(otherStartSlot);
+        if (otherStartSlotIndex === undefined) {
+            continue;
+        }
+        const otherEndSlotRaw =
+            (await getBookingEndSlot(otherBooking)) ?? otherStartSlot;
+        const otherEndSlotIndex =
+            timeSlotIndexMap.get(Number(otherEndSlotRaw)) ??
+            otherStartSlotIndex;
+        const hasOverlap =
+            otherStartSlotIndex <= targetSlotIndex &&
+            otherEndSlotIndex >= currentRangeStartIndex;
+        if (hasOverlap) {
+            throw new CustomError(
+                'Renewal conflicts with another booking of the same user',
+                ErrorCodes.BOOKING_CONFLICT
+            );
+        }
     }
 
     const renewalData = await buildRenewBookingData(
@@ -465,11 +617,11 @@ export async function performBookingRenew(
     const newBooking = await transactionProvider(async (t) => {
         const slotsToBook: number[] = [];
         for (
-            let slot = currentEndSlot + 1;
-            slot <= normalizedTimeSlot;
-            slot += 1
+            let slotIndex = currentEndSlotIndex + 1;
+            slotIndex <= targetSlotIndex;
+            slotIndex += 1
         ) {
-            slotsToBook.push(slot);
+            slotsToBook.push(orderedTimeSlots[slotIndex]);
         }
 
         const existingStatuses = await timeSlotStatusModel.findAll({
@@ -491,10 +643,16 @@ export async function performBookingRenew(
                 continue;
             }
             if (status.status === TimeSlotStatusValue.BOOKED) {
-                throw new Error('This time slot has been booked');
+                throw new CustomError(
+                    'This time slot has been booked',
+                    ErrorCodes.RENEWAL_SLOT_UNAVAILABLE
+                );
             }
             if (status.status === TimeSlotStatusValue.MAINTENANCE) {
-                throw new Error('This time slot is unavailable');
+                throw new CustomError(
+                    'This time slot is unavailable',
+                    ErrorCodes.RENEWAL_SLOT_UNAVAILABLE
+                );
             }
         }
 
@@ -608,6 +766,7 @@ export const bookingRouteDependencies = {
     performBookingCheckin,
     performBookingCheckout,
     performBookingRenew,
+    releaseBookingTimeSlot,
     expireBookingIfNeeded,
     markUserExpiredBookings,
     sequelizeTransaction: async (callback: (t: Transaction) => Promise<any>) =>

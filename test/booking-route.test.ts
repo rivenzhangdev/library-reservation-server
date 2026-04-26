@@ -2,7 +2,14 @@ import assert from 'node:assert';
 
 const bookingModule: any = require('../src/routes/booking');
 const { Booking } = require('../src/models/mysql');
-const { BookingStatus, TimeSlotStatusValue } = require('../src/models/mysql/types');
+const { BookingStatus } = require('../src/models/mysql/types');
+
+function toLocalDateOnly(value: Date) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 export async function runTests() {
   await testCheckinBookingSuccess();
@@ -15,6 +22,7 @@ export async function runTests() {
   await testCreateBookingMissingParams();
   await testCreateBookingSuccess();
   await testCancelBookingSuccess();
+  await testCancelBookingRejectedAfterStart();
   await testCancelBookingNotFound();
 }
 
@@ -242,11 +250,12 @@ async function testCreateBookingMissingParams() {
 async function testCreateBookingSuccess() {
   const originalSeatFind = bookingModule.bookingRouteDependencies.Seat.findByPk;
   const originalBookingFind = Booking.findOne;
+  const originalBookingFindAll = Booking.findAll;
   const originalBookingCreate = Booking.create;
   const originalTimeSlotFind = bookingModule.bookingRouteDependencies.TimeSlotStatus.findOne;
   const originalTimeSlotCreate = bookingModule.bookingRouteDependencies.TimeSlotStatus.create;
   const originalNotificationCreate = bookingModule.bookingRouteDependencies.Notification.create;
-  const originalMarkExpired = bookingModule.bookingRouteDependencies.markAllExpiredBookings;
+  const originalMarkUserExpired = bookingModule.bookingRouteDependencies.markUserExpiredBookings;
   const originalTransaction = bookingModule.bookingRouteDependencies.sequelizeTransaction;
   const originalResolveTimeSlot = bookingModule.bookingRouteDependencies.resolveTimeSlot;
   const originalValidateTime = bookingModule.bookingRouteDependencies.validateBookingTimeRange;
@@ -258,12 +267,14 @@ async function testCreateBookingSuccess() {
 
   bookingModule.bookingRouteDependencies.Seat.findByPk = async () => ({ id: 1 });
   Booking.findOne = async () => null;
+  Booking.findAll = async () => [];
   bookingModule.bookingRouteDependencies.TimeSlotStatus.findOne = async () => null;
   Booking.create = async (data: any) => ({ ...data, id: 101, update: async function (values: any) { Object.assign(this, values); return this; } });
   bookingModule.bookingRouteDependencies.TimeSlotStatus.create = async () => ({ });
   bookingModule.bookingRouteDependencies.Notification.create = async () => ({ });
-  bookingModule.bookingRouteDependencies.markAllExpiredBookings = async () => {};
-  bookingModule.bookingRouteDependencies.sequelizeTransaction = async (callback: any) => callback({} as any);
+  bookingModule.bookingRouteDependencies.markUserExpiredBookings = async () => {};
+  bookingModule.bookingRouteDependencies.sequelizeTransaction = async (callback: any) =>
+    callback({ LOCK: { UPDATE: 'UPDATE' } } as any);
   bookingModule.bookingRouteDependencies.resolveTimeSlot = async (value: any) => value;
   bookingModule.bookingRouteDependencies.validateBookingTimeRange = async () => ({
     isCustomTime: false,
@@ -298,11 +309,12 @@ async function testCreateBookingSuccess() {
   } finally {
     bookingModule.bookingRouteDependencies.Seat.findByPk = originalSeatFind;
     Booking.findOne = originalBookingFind;
+    Booking.findAll = originalBookingFindAll;
     Booking.create = originalBookingCreate;
     bookingModule.bookingRouteDependencies.TimeSlotStatus.findOne = originalTimeSlotFind;
     bookingModule.bookingRouteDependencies.TimeSlotStatus.create = originalTimeSlotCreate;
     bookingModule.bookingRouteDependencies.Notification.create = originalNotificationCreate;
-    bookingModule.bookingRouteDependencies.markAllExpiredBookings = originalMarkExpired;
+    bookingModule.bookingRouteDependencies.markUserExpiredBookings = originalMarkUserExpired;
     bookingModule.bookingRouteDependencies.sequelizeTransaction = originalTransaction;
     bookingModule.bookingRouteDependencies.resolveTimeSlot = originalResolveTimeSlot;
     bookingModule.bookingRouteDependencies.validateBookingTimeRange = originalValidateTime;
@@ -316,7 +328,8 @@ async function testCreateBookingSuccess() {
 
 async function testCancelBookingSuccess() {
   const originalFindOne = Booking.findOne;
-  const originalUpdate = bookingModule.bookingRouteDependencies.TimeSlotStatus.update;
+  const originalRelease = bookingModule.bookingRouteDependencies.releaseBookingTimeSlot;
+  const originalExpire = bookingModule.bookingRouteDependencies.expireBookingIfNeeded;
 
   const booking = {
     id: 'b6',
@@ -332,9 +345,9 @@ async function testCancelBookingSuccess() {
   };
 
   Booking.findOne = async () => booking;
-  bookingModule.bookingRouteDependencies.TimeSlotStatus.update = async (data: any, _options: any) => {
-    assert.deepStrictEqual(data, { status: TimeSlotStatusValue.AVAILABLE, bookingId: undefined });
-    return [1];
+  bookingModule.bookingRouteDependencies.expireBookingIfNeeded = async () => false;
+  bookingModule.bookingRouteDependencies.releaseBookingTimeSlot = async (foundBooking: any) => {
+    assert.strictEqual(foundBooking, booking);
   };
 
   try {
@@ -347,7 +360,58 @@ async function testCancelBookingSuccess() {
     assert.strictEqual(booking.status, BookingStatus.CANCELED);
   } finally {
     Booking.findOne = originalFindOne;
-    bookingModule.bookingRouteDependencies.TimeSlotStatus.update = originalUpdate;
+    bookingModule.bookingRouteDependencies.releaseBookingTimeSlot = originalRelease;
+    bookingModule.bookingRouteDependencies.expireBookingIfNeeded = originalExpire;
+  }
+}
+
+async function testCancelBookingRejectedAfterStart() {
+  const now = new Date();
+  const startedAt = new Date(now.getTime() - 5 * 60 * 1000);
+  const booking = {
+    id: 'b6-started',
+    userId: 'user6',
+    status: BookingStatus.UPCOMING,
+    seatId: 1,
+    date: toLocalDateOnly(now),
+    timeSlot: 0,
+    startTime: `${String(startedAt.getHours()).padStart(2, '0')}:${String(startedAt.getMinutes()).padStart(2, '0')}`,
+    update: async function (values: any) {
+      Object.assign(this, values);
+      return this;
+    },
+  };
+
+  const originalFindOne = Booking.findOne;
+  const originalRelease = bookingModule.bookingRouteDependencies.releaseBookingTimeSlot;
+  const originalExpire = bookingModule.bookingRouteDependencies.expireBookingIfNeeded;
+  let released = false;
+
+  Booking.findOne = async () => booking;
+  bookingModule.bookingRouteDependencies.expireBookingIfNeeded = async () => false;
+  bookingModule.bookingRouteDependencies.releaseBookingTimeSlot = async () => {
+    released = true;
+  };
+
+  try {
+    const ctx: any = {
+      params: { id: 'b6-started' },
+      state: { user: { id: 'user6' } },
+    };
+    await assert.rejects(
+      async () => {
+        await bookingModule.cancelBooking(ctx);
+      },
+      {
+        message: 'Cancellation is not allowed after booking start time',
+      }
+    );
+    assert.strictEqual(released, false);
+    assert.strictEqual(booking.status, BookingStatus.UPCOMING);
+  } finally {
+    Booking.findOne = originalFindOne;
+    bookingModule.bookingRouteDependencies.releaseBookingTimeSlot = originalRelease;
+    bookingModule.bookingRouteDependencies.expireBookingIfNeeded = originalExpire;
   }
 }
 

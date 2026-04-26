@@ -5,10 +5,16 @@ import jwt from 'jsonwebtoken';
 import Router from 'koa-router';
 import { authMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
-import { User, PhoneChangeRequest } from '../models/mongodb';
+import {
+    User,
+    PhoneChangeRequest,
+    StudentRegistry,
+    StudentIdChangeRequest,
+} from '../models/mongodb';
 import { ErrorCodes } from '../utils/error-codes';
 import { Roles } from '../constants/roles';
 import { normalizeUploadUrl } from '../utils/upload';
+import { writeAuditLog } from '../services/audit-service';
 
 dotenv.config();
 
@@ -17,6 +23,26 @@ const router = new Router({ prefix: '/api/auth' });
 const JWT_SECRET = process.env.JWT_SECRET ?? 'default_secret';
 const WX_APP_ID = process.env.WX_APP_ID;
 const WX_APP_SECRET = process.env.WX_APP_SECRET;
+
+function maskRealName(realName: string) {
+    const trimmed = String(realName || '').trim();
+    if (!trimmed) return '';
+    if (trimmed.length <= 1) return `${trimmed}*`;
+    if (trimmed.length === 2) return `${trimmed.slice(0, 1)}*`;
+    return `${trimmed.slice(0, 1)}${'*'.repeat(
+        trimmed.length - 2
+    )}${trimmed.slice(-1)}`;
+}
+
+function normalizeStudentId(value: unknown) {
+    return String(value ?? '').trim();
+}
+
+function normalizeRealName(value: unknown) {
+    return String(value ?? '')
+        .trim()
+        .replace(/\s+/g, '');
+}
 
 async function makeWeChatUsername(base: string) {
     const prefix = '微信用户';
@@ -293,6 +319,235 @@ router.post('/wxlogin', async (ctx) => {
 });
 
 /**
+ * @route POST /api/auth/student-id/precheck
+ * @desc Pre-check whether a student ID can be bound and return masked registry info
+ */
+router.post('/student-id/precheck', authMiddleware, async (ctx) => {
+    try {
+        const { studentId, forChange } = (ctx.request.body as any) ?? {};
+        const userId = (ctx as any).state.user.id;
+        const normalizedStudentId = normalizeStudentId(studentId);
+        const isChangeScene = !!forChange;
+
+        if (!/^\d{11}$/.test(normalizedStudentId)) {
+            throw new CustomError(
+                'Invalid student ID format',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        const currentUser =
+            await User.findById(userId).select('studentId name');
+        if (!currentUser) {
+            throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
+        }
+
+        if (currentUser.studentId && !isChangeScene) {
+            ctx.body = {
+                success: true,
+                data: {
+                    bindable: false,
+                    maskedName: '',
+                    college: '',
+                    major: '',
+                    grade: '',
+                    reasonCode: 'SELF_ALREADY_BOUND',
+                },
+            };
+            return;
+        }
+
+        // Step 1: Check if student ID exists in the school registry
+        const registryRecord = await StudentRegistry.findOne({
+            studentId: normalizedStudentId,
+            active: true,
+        })
+            .select('realName college major grade')
+            .lean();
+
+        if (!registryRecord) {
+            // Not in registry — student ID doesn't belong to this school
+            ctx.body = {
+                success: true,
+                data: {
+                    bindable: false,
+                    maskedName: '',
+                    college: '',
+                    major: '',
+                    grade: '',
+                    reasonCode: 'NOT_FOUND',
+                },
+            };
+            return;
+        }
+
+        // Step 2: Check if this student ID is already bound by another user
+        const existingUser = await User.findOne({
+            studentId: normalizedStudentId,
+            _id: { $ne: userId },
+        })
+            .select('_id')
+            .lean();
+
+        if (existingUser) {
+            // In registry but already bound — user may file an appeal
+            ctx.body = {
+                success: true,
+                data: {
+                    bindable: false,
+                    maskedName: maskRealName(
+                        String((registryRecord as any).realName ?? '')
+                    ),
+                    college: String((registryRecord as any).college ?? ''),
+                    major: String((registryRecord as any).major ?? ''),
+                    grade: String((registryRecord as any).grade ?? ''),
+                    reasonCode: 'ALREADY_BOUND',
+                },
+            };
+            return;
+        }
+
+        // In registry and available — return masked info for display, auto-fill name on bind
+        ctx.body = {
+            success: true,
+            data: {
+                bindable: true,
+                maskedName: maskRealName(
+                    String((registryRecord as any).realName ?? '')
+                ),
+                realName: String((registryRecord as any).realName ?? ''),
+                college: String((registryRecord as any).college ?? ''),
+                major: String((registryRecord as any).major ?? ''),
+                grade: String((registryRecord as any).grade ?? ''),
+                reasonCode: 'OK',
+            },
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        console.error('Student ID precheck failed:', error);
+        throw new CustomError(
+            'Failed to precheck student ID',
+            ErrorCodes.BIND_STUDENT_ID_ERROR
+        );
+    }
+});
+
+/**
+ * @route POST /api/auth/student-id/appeals
+ * @desc Submit appeal for student ID binding conflict
+ */
+router.post('/student-id/appeals', authMiddleware, async (ctx) => {
+    try {
+        const userId = (ctx as any).state.user.id;
+        const { studentId, realName, reason, precheckReasonCode } =
+            (ctx.request.body as any) ?? {};
+
+        const normalizedStudentId = normalizeStudentId(studentId);
+        const normalizedRealName = normalizeRealName(realName);
+        const normalizedReason = String(reason ?? '').trim();
+        const normalizedPrecheckReasonCode = String(precheckReasonCode ?? '')
+            .trim()
+            .toUpperCase();
+
+        if (!/^\d{11}$/.test(normalizedStudentId)) {
+            throw new CustomError(
+                'Invalid student ID format',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        if (!normalizedRealName) {
+            throw new CustomError(
+                'Real name is required',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        if (!normalizedReason) {
+            throw new CustomError(
+                'Reason is required',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        if (normalizedReason.length > 500) {
+            throw new CustomError(
+                'Reason is too long',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        const currentUser =
+            await User.findById(userId).select('studentId name');
+        if (!currentUser) {
+            throw new CustomError('User not found', ErrorCodes.USER_NOT_FOUND);
+        }
+
+        if (currentUser.studentId) {
+            throw new CustomError(
+                'Current account already has a bound student ID',
+                ErrorCodes.STUDENT_ID_ALREADY_BOUND
+            );
+        }
+
+        const existingPendingChangeRequest =
+            await StudentIdChangeRequest.findOne({
+                userId,
+                status: 'pending',
+            }).select('_id');
+
+        if (existingPendingChangeRequest) {
+            throw new CustomError(
+                'There is already a pending change request for this account',
+                ErrorCodes.STUDENT_ID_CHANGE_REQUEST_EXISTS
+            );
+        }
+
+        const currentUserName = String((currentUser as any).name ?? '').trim();
+        const currentUserStudentId = String(
+            (currentUser as any).studentId ?? ''
+        ).trim();
+
+        const createdRequest = await StudentIdChangeRequest.create({
+            userId,
+            requestType: 'appeal',
+            oldStudentId: currentUserStudentId,
+            oldName: currentUserName,
+            newStudentId: normalizedStudentId,
+            newRealName: normalizedRealName,
+            reason: normalizedReason,
+            precheckReasonCode: normalizedPrecheckReasonCode,
+            status: 'pending',
+        });
+
+        await writeAuditLog(ctx as any, {
+            action: 'student_id_bind_appeal_submit',
+            targetType: 'student_id_change_request',
+            targetId: String(createdRequest._id),
+            metadata: {
+                studentId: normalizedStudentId,
+                precheckReasonCode: normalizedPrecheckReasonCode,
+            },
+        });
+
+        ctx.body = {
+            success: true,
+            data: {
+                id: String(createdRequest._id),
+                status: createdRequest.status,
+            },
+        };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        console.error('Submit student ID bind appeal failed:', error);
+        throw new CustomError(
+            'Failed to submit student ID binding appeal',
+            ErrorCodes.STUDENT_ID_CHANGE_REQUEST_ERROR
+        );
+    }
+});
+
+/**
  * @route POST /api/auth/bindStudentId
  * @desc Bind student ID interface
  */
@@ -300,10 +555,19 @@ router.post('/bindStudentId', authMiddleware, async (ctx) => {
     try {
         const { studentId, realName } = ctx.request.body as any;
         const userId = (ctx as any).state.user.id;
+        const normalizedStudentId = normalizeStudentId(studentId);
+        const normalizedRealName = normalizeRealName(realName);
 
-        if (!studentId || !realName) {
+        if (!normalizedStudentId || !normalizedRealName) {
             throw new CustomError(
                 'Student ID and real name are required',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        if (!/^\d{11}$/.test(normalizedStudentId)) {
+            throw new CustomError(
+                'Invalid student ID format',
                 ErrorCodes.INVALID_PARAMS
             );
         }
@@ -321,7 +585,9 @@ router.post('/bindStudentId', authMiddleware, async (ctx) => {
         }
 
         // Check if student ID has been bound
-        const existingUser = await User.findOne({ studentId });
+        const existingUser = await User.findOne({
+            studentId: normalizedStudentId,
+        });
         if (existingUser && existingUser._id.toString() !== userId.toString()) {
             throw new CustomError(
                 'This student ID has been bound by another user',
@@ -329,9 +595,33 @@ router.post('/bindStudentId', authMiddleware, async (ctx) => {
             );
         }
 
+        const registryRecord = await StudentRegistry.findOne({
+            studentId: normalizedStudentId,
+            active: true,
+        })
+            .select('realName')
+            .lean();
+
+        if (!registryRecord) {
+            throw new CustomError(
+                'Student ID does not exist in registry',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        const expectedName = normalizeRealName(
+            (registryRecord as any).realName
+        );
+        if (expectedName !== normalizedRealName) {
+            throw new CustomError(
+                'Real name does not match registry',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
         const user = await User.findByIdAndUpdate(
             userId,
-            { studentId, name: realName },
+            { studentId: normalizedStudentId, name: normalizedRealName },
             { new: true }
         );
 

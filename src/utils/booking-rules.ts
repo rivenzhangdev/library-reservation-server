@@ -173,9 +173,22 @@ export async function getTimeSlotRange(
 }
 
 export function parseLocalDate(dateStr: string): Date | undefined {
-    const parsed = dayjs(dateStr, 'YYYY-MM-DD', true);
-    if (!parsed.isValid()) return undefined;
-    return parsed.toDate();
+    if (!dateStr || typeof dateStr !== 'string') {
+        return undefined;
+    }
+
+    const trimmed = dateStr.trim();
+    const parsedDateOnly = dayjs(trimmed, 'YYYY-MM-DD', true);
+    if (parsedDateOnly.isValid()) {
+        return parsedDateOnly.toDate();
+    }
+
+    const parsed = dayjs(trimmed);
+    if (!parsed.isValid()) {
+        return undefined;
+    }
+
+    return new Date(parsed.year(), parsed.month(), parsed.date());
 }
 
 export function isSameDay(dateStr: string, compareDate: Date): boolean {
@@ -183,17 +196,8 @@ export function isSameDay(dateStr: string, compareDate: Date): boolean {
         return false;
     }
 
-    const normalized = String(dateStr).slice(0, 10);
-    const localDate = `${compareDate.getFullYear()}-${String(
-        compareDate.getMonth() + 1
-    ).padStart(2, '0')}-${String(compareDate.getDate()).padStart(2, '0')}`;
-    const isoDate = compareDate.toISOString().slice(0, 10);
-    if (normalized === localDate || normalized === isoDate) {
-        return true;
-    }
-
-    const date = parseLocalDate(dateStr) || new Date(dateStr);
-    if (Number.isNaN(date.getTime())) {
+    const date = parseLocalDate(dateStr);
+    if (!date || Number.isNaN(date.getTime())) {
         return false;
     }
 
@@ -247,13 +251,16 @@ export async function getBookingEndMinutes(
     return parseTimeToMinutes(range.end);
 }
 
-export async function isCheckinAllowed(booking: any): Promise<boolean> {
+export async function isCheckinAllowed(
+    booking: any,
+    checkinWindowMinutes: number = CHECKIN_WINDOW_MINUTES
+): Promise<boolean> {
     if (!booking || !isSameDay(String(booking.date), new Date())) return false;
     const now = new Date();
     const nowMinutes = now.getHours() * 60 + now.getMinutes();
     const startMinutes = await getBookingStartMinutes(booking);
     const endMinutes = await getBookingEndMinutes(booking);
     if (startMinutes === undefined || endMinutes === undefined) return false;
-    const earliestCheckin = Math.max(0, startMinutes - CHECKIN_WINDOW_MINUTES);
+    const earliestCheckin = Math.max(0, startMinutes - checkinWindowMinutes);
     return nowMinutes >= earliestCheckin && nowMinutes <= endMinutes;
 }

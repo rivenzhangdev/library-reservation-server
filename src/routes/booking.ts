@@ -1,18 +1,27 @@
 import Router from 'koa-router';
 import { authMiddleware, ensureNotBlacklisted } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
-import { Booking, Floor, Seat } from '../models/mysql';
-import { Op } from 'sequelize';
+import { Booking, Floor, Seat, BookingRuleConfig } from '../models/mysql';
+import { CreditRecord, User } from '../models/mongodb';
+import { Op, UniqueConstraintError } from 'sequelize';
 import { BookingStatus, TimeSlotStatusValue } from '../models/mysql/types';
 import { normalizeNumericEnum } from '../utils/enum-normalizers';
 import { buildAuditFields, buildUpdatedBy } from '../utils/audit';
 import { ErrorCodes } from '../utils/error-codes';
+import { CreditReasons } from '../constants/credit';
 import { getUserDisplayNameFromMap } from '../utils/user-display';
 import {
     formatRouteDateTime,
     formatRouteDateTimes,
 } from '../utils/route-time-serializer';
-import { getTimeSlotConfigItems } from '../utils/time-slot-config';
+import {
+    getChronologicalTimeSlots,
+    getTimeSlotConfigItems,
+} from '../utils/time-slot-config';
+import { parseLocalDate, parseTimeToMinutes } from '../utils/booking-rules';
+import { getBookingRuleNumber } from './booking-rules';
+import { writeAuditLog } from '../services/audit-service';
+import { notifyBookingSuccess } from '../services/subscription-message-service';
 import {
     bookingRouteDependencies,
     buildRenewBookingData as buildRenewBookingDataService,
@@ -21,9 +30,12 @@ import {
     getBookingEndSlot as getBookingEndSlotService,
     isBookingOverdue as isBookingOverdueService,
     markAllExpiredBookings as markAllExpiredBookingsService,
+    markUserExpiredBookings as markUserExpiredBookingsService,
     performBookingCheckin as performBookingCheckinService,
     performBookingCheckout as performBookingCheckoutService,
     performBookingRenew as performBookingRenewService,
+    getRenewalAdvanceDays as getRenewalAdvanceDaysService,
+    isBookingWithinRenewalWindow as isBookingWithinRenewalWindowService,
     releaseBookingTimeSlot as releaseBookingTimeSlotService,
     validateBookingRequest as validateBookingRequestService,
 } from '../services/booking-service';
@@ -39,10 +51,77 @@ export const checkBookingPermissions = checkBookingPermissionsService;
 export const isBookingOverdue = isBookingOverdueService;
 export const expireBookingIfNeeded = expireBookingIfNeededService;
 export const markAllExpiredBookings = markAllExpiredBookingsService;
+export const markUserExpiredBookings = markUserExpiredBookingsService;
 export const performBookingCheckin = performBookingCheckinService;
 export const performBookingCheckout = performBookingCheckoutService;
 export const performBookingRenew = performBookingRenewService;
 export const getBookingEndSlot = getBookingEndSlotService;
+export const getRenewalAdvanceDays = getRenewalAdvanceDaysService;
+export const isBookingWithinRenewalWindow = isBookingWithinRenewalWindowService;
+
+function normalizeTimePart(value: any): string {
+    const raw = String(value ?? '').trim();
+    if (!raw) return '';
+    if (raw.includes('T')) {
+        return raw.split('T')[1]?.slice(0, 8) || '';
+    }
+    if (raw.includes(' ')) {
+        return raw.split(' ')[1]?.slice(0, 8) || '';
+    }
+    return raw.slice(0, 8);
+}
+
+async function getBookingStartMinutesForRecord(
+    booking: any
+): Promise<number | undefined> {
+    const startTimeMinutes = parseTimeToMinutes(
+        normalizeTimePart(booking?.startTime)
+    );
+    if (startTimeMinutes !== undefined) {
+        return startTimeMinutes;
+    }
+    const slotConfigs = await getTimeSlotConfigItems();
+    const slotConfig = slotConfigs.find(
+        (item) => item.timeSlot === Number(booking?.timeSlot)
+    );
+    return slotConfig
+        ? parseTimeToMinutes(String(slotConfig.startTime))
+        : undefined;
+}
+
+async function applyLateCancelPenalty(
+    booking: any,
+    operatorId: string,
+    penaltyPointsRaw: number
+): Promise<void> {
+    const penaltyPoints = Math.max(
+        0,
+        Math.floor(Number(penaltyPointsRaw) || 0)
+    );
+    if (penaltyPoints <= 0) return;
+
+    const existing = await CreditRecord.findOne({
+        bookingId: booking.id,
+        reason: CreditReasons.BOOKING_LATE_CANCEL_PENALTY,
+    });
+    if (existing) return;
+
+    const user = await User.findById(booking.userId);
+    if (!user) return;
+
+    const currentScore = Number(user.creditScore ?? 100);
+    user.creditScore = Math.max(0, currentScore - penaltyPoints);
+    await user.save();
+
+    await CreditRecord.create({
+        userId: booking.userId,
+        bookingId: booking.id,
+        type: 1,
+        points: penaltyPoints,
+        reason: CreditReasons.BOOKING_LATE_CANCEL_PENALTY,
+        updatedBy: operatorId,
+    });
+}
 
 export async function createBooking(ctx: any) {
     try {
@@ -80,48 +159,165 @@ export async function createBooking(ctx: any) {
                 endTime,
             });
 
-        // expire stale bookings before checking availability, to avoid holding slots forever
-        await bookingRouteDependencies.markAllExpiredBookings();
+        const maxBookingPerDay = await getBookingRuleNumber(
+            'max_booking_per_day',
+            3
+        );
+        const advanceBookingDays = await getBookingRuleNumber(
+            'advance_booking_days',
+            7
+        );
+        const maxBookingDurationHours = await getBookingRuleNumber(
+            'max_booking_duration_hours',
+            4
+        );
 
-        // Check if time slot is available
-        const existingStatus =
-            await bookingRouteDependencies.TimeSlotStatus.findOne({
-                where: {
-                    seatId,
-                    date,
-                    timeSlot: normalizedTimeSlot,
-                },
-            });
-
-        if (existingStatus?.status === TimeSlotStatusValue.BOOKED) {
+        const bookingDate = parseLocalDate(date);
+        if (!bookingDate) {
+            throw new CustomError('Invalid date', ErrorCodes.INVALID_PARAMS);
+        }
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const maxAllowedDate = new Date(today);
+        maxAllowedDate.setDate(
+            maxAllowedDate.getDate() +
+                Math.max(0, Math.floor(advanceBookingDays))
+        );
+        if (bookingDate.getTime() > maxAllowedDate.getTime()) {
             throw new CustomError(
-                'This time slot has been booked',
-                ErrorCodes.BOOKING_CONFLICT
+                `Booking date exceeds advance booking limit (${Math.floor(
+                    advanceBookingDays
+                )} days)`,
+                ErrorCodes.INVALID_PARAMS
             );
         }
 
-        // Check if user has already booked this time slot
-        const existingBooking = await Booking.findOne({
-            where: {
-                userId: userId.toString(),
-                date,
-                timeSlot: normalizedTimeSlot,
-                status: {
-                    [Op.in]: [BookingStatus.UPCOMING, BookingStatus.ONGOING],
-                },
-            },
-        });
-
-        if (existingBooking) {
+        const durationMinutes =
+            (parseTimeToMinutes(normalizeTimePart(finalEndTime)) ?? 0) -
+            (parseTimeToMinutes(normalizeTimePart(finalStartTime)) ?? 0);
+        const maxDurationMinutes =
+            Math.max(1, Number(maxBookingDurationHours)) * 60;
+        if (durationMinutes > maxDurationMinutes) {
             throw new CustomError(
-                'You have already booked this time slot',
-                5002
+                `Booking duration exceeds limit (${maxBookingDurationHours} hours)`,
+                ErrorCodes.INVALID_PARAMS
             );
         }
+
+        await bookingRouteDependencies.markUserExpiredBookings(
+            userId,
+            userId.toString()
+        );
 
         // Create booking and time slot state inside a transaction
         let booking: any;
         await bookingRouteDependencies.sequelizeTransaction(async (t) => {
+            const existingStatus =
+                await bookingRouteDependencies.TimeSlotStatus.findOne({
+                    where: {
+                        seatId,
+                        date,
+                        timeSlot: normalizedTimeSlot,
+                    },
+                    transaction: t,
+                    lock: t.LOCK.UPDATE,
+                });
+
+            if (existingStatus?.status === TimeSlotStatusValue.BOOKED) {
+                throw new CustomError(
+                    'This time slot has been booked',
+                    ErrorCodes.BOOKING_CONFLICT
+                );
+            }
+
+            const existingBooking = await Booking.findOne({
+                where: {
+                    userId: userId.toString(),
+                    date,
+                    timeSlot: normalizedTimeSlot,
+                    status: {
+                        [Op.in]: [
+                            BookingStatus.UPCOMING,
+                            BookingStatus.ONGOING,
+                        ],
+                    },
+                },
+                transaction: t,
+                lock: t.LOCK.UPDATE,
+            });
+
+            if (existingBooking) {
+                throw new CustomError(
+                    'You have already booked this time slot',
+                    5002
+                );
+            }
+
+            const sameDayBookings = await Booking.findAll({
+                where: {
+                    userId: userId.toString(),
+                    date,
+                    status: {
+                        [Op.in]: [
+                            BookingStatus.UPCOMING,
+                            BookingStatus.ONGOING,
+                            BookingStatus.COMPLETED,
+                            BookingStatus.VIOLATED,
+                        ],
+                    },
+                },
+                transaction: t,
+                lock: t.LOCK.UPDATE,
+            });
+
+            if (
+                Number.isFinite(maxBookingPerDay) &&
+                maxBookingPerDay > 0 &&
+                sameDayBookings.length >= Math.floor(maxBookingPerDay)
+            ) {
+                throw new CustomError(
+                    'Daily booking limit exceeded',
+                    ErrorCodes.BOOKING_DAILY_LIMIT_EXCEEDED
+                );
+            }
+
+            const requestStartMinutes = parseTimeToMinutes(
+                normalizeTimePart(finalStartTime)
+            );
+            const requestEndMinutes = parseTimeToMinutes(
+                normalizeTimePart(finalEndTime)
+            );
+
+            if (
+                requestStartMinutes !== undefined &&
+                requestEndMinutes !== undefined
+            ) {
+                for (const item of sameDayBookings as any[]) {
+                    const existStartMinutes = parseTimeToMinutes(
+                        normalizeTimePart(item.startTime)
+                    );
+                    const existEndMinutes = parseTimeToMinutes(
+                        normalizeTimePart(item.endTime)
+                    );
+                    if (
+                        existStartMinutes === undefined ||
+                        existEndMinutes === undefined
+                    ) {
+                        continue;
+                    }
+
+                    const overlapped =
+                        requestStartMinutes < existEndMinutes &&
+                        requestEndMinutes > existStartMinutes;
+                    if (overlapped) {
+                        throw new CustomError(
+                            'You already have another booking in overlapping time range',
+                            ErrorCodes.BOOKING_CONFLICT
+                        );
+                    }
+                }
+            }
+
             booking = await Booking.create(
                 {
                     userId: userId.toString(),
@@ -158,68 +354,27 @@ export async function createBooking(ctx: any) {
             }
         });
 
-        // Create notification
-        await bookingRouteDependencies.Notification.create({
-            userId,
-            createdBy: userId,
-            type: 1, // NotificationType.BOOKING
-            title: 'Booking successful',
-            content: `You have successfully booked a seat on ${date}`,
-            relatedId: booking.id.toString(),
-            updatedBy: userId,
-        });
-
-        // Send WeChat subscription message for booking success if available.
+        // Send booking success notification + WeChat subscription message via service
         try {
-            const config =
-                bookingRouteDependencies.wechatTemplateConfig.BOOKING_SUCCESS;
-            if (
-                config?.templateId &&
-                !config.templateId.startsWith('TEMPLATE_ID_')
-            ) {
-                const seat =
-                    await bookingRouteDependencies.Seat.findByPk(seatId);
-                const seatInfo = seat
-                    ? `${
-                          seat.description
-                              ? seat.description
-                              : `Floor ${seat.floorId} Row ${seat.rowNum} Col ${seat.colNum}`
-                      }`
-                    : `Seat ${seatId}`;
-                const payload =
-                    bookingRouteDependencies.buildWechatTemplatePayload(
-                        'BOOKING_SUCCESS',
-                        {
-                            title: 'Booking successful',
-                            bookingTime: `${date} ${finalStartTime}-${finalEndTime}`,
-                            seatInfo,
-                            location:
-                                seat?.description ??
-                                `Floor ${seat?.floorId ?? ''}`,
-                            remark: 'Your seat reservation is confirmed.',
-                        }
-                    );
-
-                if (payload) {
-                    const currentUser =
-                        await bookingRouteDependencies.UserModel.findById(
-                            userId
-                        )
-                            .select('username')
-                            .lean();
-                    const targetOpenId = currentUser?.username;
-                    if (targetOpenId) {
-                        await bookingRouteDependencies.sendWechatSubscribeMessage(
-                            targetOpenId,
-                            config.templateId,
-                            config.page,
-                            payload
-                        );
-                    }
-                }
-            }
+            const seat = await bookingRouteDependencies.Seat.findByPk(seatId);
+            const seatInfo = seat
+                ? seat.description
+                    ? seat.description
+                    : `Floor ${seat.floorId} Row ${seat.rowNum} Col ${seat.colNum}`
+                : `Seat ${seatId}`;
+            const location =
+                seat?.description ?? `Floor ${seat?.floorId ?? ''}`;
+            await notifyBookingSuccess({
+                userId,
+                bookingId: booking.id.toString(),
+                date,
+                startTime: finalStartTime,
+                endTime: finalEndTime,
+                seatInfo,
+                location,
+            });
         } catch (err) {
-            console.error('Failed to send WeChat subscription message', err);
+            console.error('Failed to send booking success notification', err);
         }
 
         // try fetch createdBy display name
@@ -253,6 +408,32 @@ export async function createBooking(ctx: any) {
         };
     } catch (error: any) {
         if (error.isCustom) throw error;
+        const mysqlCode = String(
+            error?.original?.code || error?.parent?.code || ''
+        ).toUpperCase();
+        const mysqlErrno = Number(
+            error?.original?.errno || error?.parent?.errno || NaN
+        );
+        if (
+            error instanceof UniqueConstraintError ||
+            error?.name === 'SequelizeUniqueConstraintError'
+        ) {
+            throw new CustomError(
+                'This time slot has been booked',
+                ErrorCodes.BOOKING_CONFLICT
+            );
+        }
+        if (
+            mysqlCode === 'ER_LOCK_DEADLOCK' ||
+            mysqlCode === 'ER_LOCK_WAIT_TIMEOUT' ||
+            mysqlErrno === 1213 ||
+            mysqlErrno === 1205
+        ) {
+            throw new CustomError(
+                'This time slot has been booked',
+                ErrorCodes.BOOKING_CONFLICT
+            );
+        }
         throw new CustomError(
             'Failed to create booking',
             ErrorCodes.CREATE_BOOKING_ERROR
@@ -263,6 +444,7 @@ export async function createBooking(ctx: any) {
 router.post('/', authMiddleware, createBooking);
 
 /**
+                                }
  * @route GET /api/booking/my
  * @desc Get my bookings interface
  */
@@ -313,10 +495,16 @@ router.get('/my', authMiddleware, async (ctx) => {
         });
 
         const slotConfigs = await getTimeSlotConfigItems();
-        const maxTimeSlot = slotConfigs.reduce(
-            (max, item) => Math.max(max, item.timeSlot),
-            -1
+        const maxRenewalExtraSlots = await getBookingRuleNumber(
+            'renewal.maxExtraSlots',
+            1
         );
+        const renewalAdvanceDays = await getRenewalAdvanceDays();
+        const orderedTimeSlots = getChronologicalTimeSlots(slotConfigs);
+        const timeSlotIndexMap = new Map<number, number>(
+            orderedTimeSlots.map((slot, index) => [slot, index])
+        );
+        const maxTimeSlotIndex = orderedTimeSlots.length - 1;
 
         const renewalStatusConditions: any[] = [];
         const bookingRenewalTargets: Array<{
@@ -325,18 +513,25 @@ router.get('/my', authMiddleware, async (ctx) => {
             timeSlot: number;
         }> = [];
 
-        rows.forEach((booking) => {
+        for (const booking of rows) {
+            const bookingStartSlot = Number(booking.timeSlot);
+            const currentEndSlot =
+                (await getBookingEndSlot(booking)) ?? bookingStartSlot;
+            const currentEndSlotIndex = timeSlotIndexMap.get(
+                Number(currentEndSlot)
+            );
             if (
                 booking.status === BookingStatus.UPCOMING &&
-                Number.isFinite(booking.timeSlot) &&
-                booking.timeSlot < maxTimeSlot
+                currentEndSlotIndex !== undefined &&
+                currentEndSlotIndex < maxTimeSlotIndex
             ) {
                 const bookingDate = String(booking.date);
                 for (
-                    let slot = booking.timeSlot + 1;
-                    slot <= maxTimeSlot;
-                    slot += 1
+                    let slotIndex = currentEndSlotIndex + 1;
+                    slotIndex <= maxTimeSlotIndex;
+                    slotIndex += 1
                 ) {
+                    const slot = orderedTimeSlots[slotIndex];
                     bookingRenewalTargets.push({
                         seatId: booking.seatId,
                         date: bookingDate,
@@ -344,7 +539,7 @@ router.get('/my', authMiddleware, async (ctx) => {
                     });
                 }
             }
-        });
+        }
 
         if (bookingRenewalTargets.length > 0) {
             bookingRenewalTargets.forEach((target) => {
@@ -374,44 +569,147 @@ router.get('/my', authMiddleware, async (ctx) => {
             ] = status.status;
         });
 
+        const bookingSlotRanges = await Promise.all(
+            rows.map(async (booking) => {
+                const startSlot = Number(booking.timeSlot);
+                const startSlotIndex = timeSlotIndexMap.get(startSlot);
+                if (startSlotIndex === undefined) {
+                    return {
+                        bookingId: String(booking.id),
+                        date: String(booking.date),
+                        startSlotIndex: -1,
+                        endSlotIndex: -1,
+                    };
+                }
+                const endSlot = (await getBookingEndSlot(booking)) ?? startSlot;
+                const endSlotIndex = timeSlotIndexMap.get(Number(endSlot));
+                return {
+                    bookingId: String(booking.id),
+                    date: String(booking.date),
+                    startSlotIndex,
+                    endSlotIndex:
+                        endSlotIndex === undefined
+                            ? startSlotIndex
+                            : endSlotIndex,
+                };
+            })
+        );
+
         const list = await Promise.all(
             rows.map(async (booking) => {
                 const bookingDate = String(booking.date);
                 const renewableTimeSlots: number[] = [];
+                let renewalBlockedReason = '';
                 if (
                     booking.status === BookingStatus.UPCOMING &&
                     Number.isFinite(booking.timeSlot)
                 ) {
+                    const withinRenewalWindow =
+                        await isBookingWithinRenewalWindow(bookingDate);
+                    if (!withinRenewalWindow) {
+                        renewalBlockedReason = 'advance_window_not_reached';
+                    }
+
                     const currentEndSlot =
                         (await getBookingEndSlot(booking)) ?? booking.timeSlot;
-                    for (
-                        let slot = currentEndSlot + 1;
-                        slot <= maxTimeSlot;
-                        slot += 1
+                    const currentStartSlot = Number(booking.timeSlot);
+                    const currentStartSlotIndex =
+                        timeSlotIndexMap.get(currentStartSlot);
+                    const currentEndSlotIndex = timeSlotIndexMap.get(
+                        Number(currentEndSlot)
+                    );
+
+                    if (
+                        !renewalBlockedReason &&
+                        (currentStartSlotIndex === undefined ||
+                            currentEndSlotIndex === undefined)
                     ) {
-                        let blocked = false;
+                        renewalBlockedReason = 'invalid_time_slot';
+                    } else if (!renewalBlockedReason) {
+                        const startSlotIndex = currentStartSlotIndex as number;
+                        const endSlotIndex = currentEndSlotIndex as number;
+
+                        if (endSlotIndex >= maxTimeSlotIndex) {
+                            renewalBlockedReason = 'no_later_time_slot';
+                        }
+                        const existingExtraSlots = Math.max(
+                            0,
+                            endSlotIndex - startSlotIndex
+                        );
+                        const remainingExtraSlots = Math.max(
+                            0,
+                            maxRenewalExtraSlots - existingExtraSlots
+                        );
+                        if (remainingExtraSlots <= 0 && !renewalBlockedReason) {
+                            renewalBlockedReason = 'renewal_limit_reached';
+                        }
+                        const maxRenewTargetSlotIndex = Math.min(
+                            maxTimeSlotIndex,
+                            endSlotIndex + remainingExtraSlots
+                        );
+                        const sameUserRanges = bookingSlotRanges.filter(
+                            (range) =>
+                                range.bookingId !== String(booking.id) &&
+                                range.date === bookingDate &&
+                                range.startSlotIndex >= 0
+                        );
                         for (
-                            let checkSlot = currentEndSlot + 1;
-                            checkSlot <= slot;
-                            checkSlot += 1
+                            let slotIndex = endSlotIndex + 1;
+                            slotIndex <= maxRenewTargetSlotIndex;
+                            slotIndex += 1
                         ) {
-                            const key = `${String(
-                                booking.seatId
-                            )}|${bookingDate}|${checkSlot}`;
-                            const slotStatus = renewalStatusMap[key];
-                            if (
-                                slotStatus !== undefined &&
-                                slotStatus !== TimeSlotStatusValue.AVAILABLE
+                            const targetSlot = orderedTimeSlots[slotIndex];
+                            let blocked = false;
+                            for (
+                                let checkSlotIndex = endSlotIndex + 1;
+                                checkSlotIndex <= slotIndex;
+                                checkSlotIndex += 1
                             ) {
-                                blocked = true;
-                                break;
+                                const checkSlot =
+                                    orderedTimeSlots[checkSlotIndex];
+                                const key = `${String(
+                                    booking.seatId
+                                )}|${bookingDate}|${checkSlot}`;
+                                const slotStatus = renewalStatusMap[key];
+                                if (
+                                    slotStatus !== undefined &&
+                                    slotStatus !== TimeSlotStatusValue.AVAILABLE
+                                ) {
+                                    blocked = true;
+                                    break;
+                                }
+                            }
+                            if (!blocked) {
+                                const hasSelfOverlap = sameUserRanges.some(
+                                    (range) =>
+                                        range.startSlotIndex <= slotIndex &&
+                                        range.endSlotIndex >= startSlotIndex
+                                );
+                                if (hasSelfOverlap) {
+                                    blocked = true;
+                                }
+                            }
+                            if (!blocked) {
+                                renewableTimeSlots.push(targetSlot);
                             }
                         }
-                        if (!blocked) {
-                            renewableTimeSlots.push(slot);
-                        }
                     }
+
+                    if (
+                        renewableTimeSlots.length === 0 &&
+                        !renewalBlockedReason
+                    ) {
+                        renewalBlockedReason = 'slots_unavailable_or_conflict';
+                    }
+                } else if (booking.status !== BookingStatus.UPCOMING) {
+                    renewalBlockedReason = 'status_not_upcoming';
+                } else {
+                    renewalBlockedReason = 'invalid_time_slot';
                 }
+
+                const canRenew =
+                    booking.status === BookingStatus.UPCOMING &&
+                    renewableTimeSlots.length > 0;
 
                 return {
                     id: booking.id,
@@ -430,9 +728,9 @@ router.get('/my', authMiddleware, async (ctx) => {
                     endTime: formatRouteDateTime(booking.endTime),
                     status: booking.status,
                     renewableTimeSlots,
-                    canRenew:
-                        booking.status === BookingStatus.UPCOMING &&
-                        renewableTimeSlots.length > 0,
+                    canRenew,
+                    renewalAdvanceDays,
+                    renewalBlockedReason: canRenew ? '' : renewalBlockedReason,
                 };
             })
         );
@@ -474,21 +772,76 @@ export async function cancelBooking(ctx: any) {
             );
         }
 
+        const expired = await bookingRouteDependencies.expireBookingIfNeeded(
+            booking,
+            userId.toString()
+        );
+        if (expired) {
+            ctx.body = {
+                success: true,
+            };
+            return;
+        }
+
+        const cancelBeforeMinutes = await getBookingRuleNumber(
+            'cancel_before_minutes',
+            30
+        );
+        const lateCancelPenaltyCredit = await getBookingRuleNumber(
+            'late_cancel_penalty_credit',
+            5
+        );
+
+        const bookingDate = parseLocalDate(String(booking.date));
+        const startMinutes = await getBookingStartMinutesForRecord(booking);
+        let withinRestrictedWindow = false;
+        let startedAlready = false;
+        if (bookingDate && startMinutes !== undefined) {
+            const now = new Date();
+            const dayStart = new Date(now);
+            dayStart.setHours(0, 0, 0, 0);
+            const targetDay = new Date(bookingDate);
+            targetDay.setHours(0, 0, 0, 0);
+            if (targetDay.getTime() === dayStart.getTime()) {
+                const nowMinutes = now.getHours() * 60 + now.getMinutes();
+                startedAlready = nowMinutes >= startMinutes;
+                withinRestrictedWindow =
+                    !startedAlready &&
+                    nowMinutes >=
+                        startMinutes - Math.max(0, cancelBeforeMinutes);
+            }
+        }
+
+        if (startedAlready) {
+            throw new CustomError(
+                'Cancellation is not allowed after booking start time',
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
+        if (withinRestrictedWindow) {
+            if (lateCancelPenaltyCredit <= 0) {
+                throw new CustomError(
+                    `Cancellation is not allowed within ${Math.max(
+                        0,
+                        Math.floor(cancelBeforeMinutes)
+                    )} minutes before start`,
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+            await applyLateCancelPenalty(
+                booking,
+                userId.toString(),
+                lateCancelPenaltyCredit
+            );
+        }
+
         await booking.update({
             status: BookingStatus.CANCELED,
             ...buildUpdatedBy(ctx),
         });
 
-        await bookingRouteDependencies.TimeSlotStatus.update(
-            { status: TimeSlotStatusValue.AVAILABLE, bookingId: undefined },
-            {
-                where: {
-                    seatId: booking.seatId,
-                    date: booking.date,
-                    timeSlot: booking.timeSlot,
-                },
-            }
-        );
+        await bookingRouteDependencies.releaseBookingTimeSlot(booking);
 
         ctx.body = {
             success: true,
@@ -503,6 +856,60 @@ export async function cancelBooking(ctx: any) {
 }
 
 router.delete('/:id', authMiddleware, cancelBooking);
+
+/**
+ * 计算两点之间的球面距离（Haversine公式），单位：米
+ */
+function haversineDistance(
+    lat1: number,
+    lng1: number,
+    lat2: number,
+    lng2: number
+): number {
+    const R = 6371000;
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) *
+            Math.cos(toRad(lat2)) *
+            Math.sin(dLng / 2) *
+            Math.sin(dLng / 2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+async function getGeofenceConfig(): Promise<{
+    latitude: number | null;
+    longitude: number | null;
+    radiusMeters: number;
+    mode: 'soft' | 'strict';
+}> {
+    const keys = [
+        'library_latitude',
+        'library_longitude',
+        'geofence_radius_meters',
+        'geofence_mode',
+    ];
+    const rules = await BookingRuleConfig.findAll({
+        where: { ruleKey: keys, enabled: true },
+    });
+    const map: Record<string, string> = {};
+    for (const r of rules) map[r.ruleKey] = r.ruleValue;
+
+    return {
+        latitude: map['library_latitude']
+            ? Number(map['library_latitude'])
+            : null,
+        longitude: map['library_longitude']
+            ? Number(map['library_longitude'])
+            : null,
+        radiusMeters: map['geofence_radius_meters']
+            ? Number(map['geofence_radius_meters'])
+            : 500,
+        mode: (map['geofence_mode'] as 'soft' | 'strict') ?? 'soft',
+    };
+}
 
 export async function checkinBooking(ctx: any) {
     try {
@@ -525,6 +932,54 @@ export async function checkinBooking(ctx: any) {
                 'Booking not found',
                 ErrorCodes.BOOKING_NOT_FOUND
             );
+        }
+
+        // 地理围栏校验（软警告或强拒绝）
+        const body = ctx.request?.body as any;
+        const clientLat = body?.latitude != null ? Number(body.latitude) : null;
+        const clientLng =
+            body?.longitude != null ? Number(body.longitude) : null;
+
+        if (
+            clientLat !== null &&
+            clientLng !== null &&
+            !Number.isNaN(clientLat) &&
+            !Number.isNaN(clientLng)
+        ) {
+            const geo = await getGeofenceConfig();
+            if (geo.latitude !== null && geo.longitude !== null) {
+                const distance = haversineDistance(
+                    clientLat,
+                    clientLng,
+                    geo.latitude,
+                    geo.longitude
+                );
+                const outOfRange = distance > geo.radiusMeters;
+
+                // 非阻塞写入审计日志
+                writeAuditLog(ctx, {
+                    action: 'CHECKIN_LOCATION',
+                    targetType: 'booking',
+                    targetId: String(bookingId),
+                    metadata: {
+                        latitude: clientLat,
+                        longitude: clientLng,
+                        distanceMeters: Math.round(distance),
+                        radiusMeters: geo.radiusMeters,
+                        outOfRange,
+                        mode: geo.mode,
+                    },
+                }).catch(() => {});
+
+                if (outOfRange && geo.mode === 'strict') {
+                    throw new CustomError(
+                        `Check-in location is too far from the library (${Math.round(
+                            distance
+                        )}m, limit ${geo.radiusMeters}m)`,
+                        ErrorCodes.CHECKIN_NOT_ALLOWED
+                    );
+                }
+            }
         }
 
         await bookingRouteDependencies.performBookingCheckin(

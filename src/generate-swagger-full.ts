@@ -1352,7 +1352,7 @@ const allPaths = {
                                     data: {
                                         type: 'object',
                                         properties: {
-                                            bookings: {
+                                            list: {
                                                 type: 'array',
                                                 items: {
                                                     type: 'object',
@@ -1401,12 +1401,35 @@ const allPaths = {
                                                         status: {
                                                             type: 'integer',
                                                         },
+                                                        renewableTimeSlots: {
+                                                            type: 'array',
+                                                            items: {
+                                                                type: 'integer',
+                                                            },
+                                                            description:
+                                                                '可续约目标时段（按时序）',
+                                                        },
+                                                        canRenew: {
+                                                            type: 'boolean',
+                                                            description:
+                                                                '当前是否可续约',
+                                                        },
+                                                        renewalBlockedReason: {
+                                                            type: 'string',
+                                                            description:
+                                                                '不可续约原因：advance_window_not_reached/no_later_time_slot/renewal_limit_reached/slots_unavailable_or_conflict 等',
+                                                        },
+                                                        renewalAdvanceDays: {
+                                                            type: 'integer',
+                                                            description:
+                                                                '续约提前天数配置（renewal.advanceDays）',
+                                                        },
                                                     },
                                                 },
                                             },
                                             total: { type: 'integer' },
                                             page: { type: 'integer' },
-                                            limit: { type: 'integer' },
+                                            pageSize: { type: 'integer' },
                                         },
                                     },
                                 },
@@ -1591,6 +1614,10 @@ const allPaths = {
             },
             responses: {
                 200: { description: '续约成功' },
+                400: {
+                    description:
+                        '续约失败（参数错误、未到续约窗口、超限、目标时段不可用或冲突）',
+                },
                 404: { description: '预约不存在' },
             },
         },

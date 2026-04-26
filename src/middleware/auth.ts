@@ -123,7 +123,7 @@ export async function authMiddleware(ctx: Context, next: Next) {
             id: latestUser?._id ? String(latestUser._id) : normalizedId,
             role: latestUser?.role ?? d.role,
             username: latestUser?.username ?? d.username,
-            name: latestUser?.username ?? latestUser?.name ?? d.name,
+            name: latestUser?.name ?? latestUser?.username ?? d.name,
             avatar: normalizeUploadUrl(
                 String(latestUser?.avatar || d.avatar || '')
             ),
@@ -204,7 +204,7 @@ export async function optionalAuthMiddleware(ctx: Context, next: Next) {
                 id: latestUser?._id ? String(latestUser._id) : normalizedId,
                 role: latestUser?.role ?? d.role,
                 username: latestUser?.username ?? d.username,
-                name: latestUser?.username ?? latestUser?.name ?? d.name,
+                name: latestUser?.name ?? latestUser?.username ?? d.name,
                 avatar: latestUser?.avatar ?? d.avatar,
                 blacklisted: !!latestUser?.blacklisted,
                 blacklistReason:

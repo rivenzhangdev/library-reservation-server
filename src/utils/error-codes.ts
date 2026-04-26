@@ -98,6 +98,8 @@ export const ErrorCodes = {
     CHANGE_REQUEST_ALREADY_REVIEWED: 5202, // 申请已审批
     CHANGE_REQUEST_DUPLICATE: 5203, // 重复提交
     CHANGE_REQUEST_TARGET_UNAVAILABLE: 5204, // 目标时段/座位不可用
+    CHANGE_REQUEST_LIMIT_EXCEEDED: 5205, // 变更申请次数已达上限
+    CHANGE_REQUEST_INVALID_TARGET: 5206, // 变更目标无效（日期/时段）
 
     // ==================== 预约续约错误 (5300-5399) ====================
     RENEWAL_LIMIT_EXCEEDED: 5301, // 续约次数已达上限

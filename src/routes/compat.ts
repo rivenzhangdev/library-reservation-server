@@ -42,6 +42,7 @@ import {
     validateBookingTimeRange,
 } from '../utils/booking-rules';
 import { getCreditRuleValues } from '../utils/credit-rule-config';
+import { repairOrphanActiveBookings } from '../services/orphan-booking-service';
 
 const router = new Router({ prefix: '/api' });
 
@@ -112,17 +113,39 @@ async function getPersistedViolationDeductPoints() {
 }
 
 function getDisplayName(value: any, userMap: Record<string, any>) {
+    const isBenchPlaceholder = (input: any) => {
+        const normalized = String(input || '')
+            .trim()
+            .toLowerCase();
+        return (
+            normalized === 'bench user' ||
+            normalized === 'bench_user' ||
+            normalized === 'bench-user'
+        );
+    };
+
     if (!value) return undefined;
     if (typeof value === 'object') {
+        const objectName = String(value.name || '').trim();
+        const objectUsername = String(value.username || '').trim();
         return (
-            value.username ||
-            value.name ||
+            objectUsername ||
+            (objectName && !isBenchPlaceholder(objectName)
+                ? objectName
+                : undefined) ||
             userMap[toAuditId(value) || '']?.username ||
-            userMap[toAuditId(value) || '']?.name
+            userMap[toAuditId(value) || '']?.name ||
+            undefined
         );
     }
     const id = String(value);
-    return userMap[id]?.username || userMap[id]?.name || undefined;
+    const mapName = String(userMap[id]?.name || '').trim();
+    const mapUsername = String(userMap[id]?.username || '').trim();
+    return (
+        mapUsername ||
+        (mapName && !isBenchPlaceholder(mapName) ? mapName : undefined) ||
+        undefined
+    );
 }
 
 function toLocalDateOnly(value: Date) {
@@ -452,21 +475,22 @@ router.post('/bookings/cancel/:id', authMiddleware, async (ctx) => {
             );
 
         const currentUserId = (ctx as any).state.user.id;
+
+        const expired = await compatRouteDependencies.expireBookingIfNeeded(
+            booking,
+            currentUserId
+        );
+        if (expired) {
+            ctx.body = { success: true };
+            return;
+        }
+
         await booking.update({
             status: BookingStatus.CANCELED,
             updatedBy: currentUserId,
         });
 
-        await TimeSlotStatus.update(
-            { status: TimeSlotStatusValue.AVAILABLE, bookingId: undefined },
-            {
-                where: {
-                    seatId: booking.seatId,
-                    date: booking.date,
-                    timeSlot: booking.timeSlot,
-                },
-            }
-        );
+        await compatRouteDependencies.releaseBookingTimeSlot(booking);
 
         ctx.body = { success: true };
     } catch (error: any) {
@@ -1193,6 +1217,17 @@ router.delete('/floors/:id', authMiddleware, async (ctx) => {
                 'Floor not found',
                 ErrorCodes.FLOOR_NOT_FOUND
             );
+
+        const seatCount = await Seat.count({
+            where: { floorId: Number(id) },
+        });
+        if (seatCount > 0) {
+            throw new CustomError(
+                `Cannot delete floor with ${seatCount} seat(s). Please delete seats under this floor first.`,
+                ErrorCodes.INVALID_PARAMS
+            );
+        }
+
         await floor.destroy();
         ctx.body = { success: true };
     } catch (error: any) {
@@ -1620,12 +1655,57 @@ router.delete('/user/:id', authMiddleware, async (ctx) => {
     try {
         requireAdmin(ctx);
         const id = ctx.params.id;
+        const operatorId = String((ctx as any).state.user?.id || '');
         const targetUser = await User.findById(id)
             .select('isSuperAdmin')
             .lean();
         if (targetUser) {
             assertNotProtectedSuperAdmin(targetUser);
         }
+
+        // Cancel active bookings and release occupied slot statuses before deleting user.
+        // Keep historical completed/violated bookings for audit statistics.
+        await markAllExpiredBookings();
+        const activeBookings = await Booking.findAll({
+            where: {
+                userId: String(id),
+                status: {
+                    [Op.in]: [BookingStatus.UPCOMING, BookingStatus.ONGOING],
+                },
+            },
+            attributes: ['id'],
+        });
+
+        const activeBookingIds = activeBookings
+            .map((item: any) => Number(item.id))
+            .filter((item) => Number.isFinite(item));
+
+        if (activeBookingIds.length > 0) {
+            await sequelize.transaction(async (t: Transaction) => {
+                await Booking.update(
+                    {
+                        status: BookingStatus.CANCELED,
+                        ...(operatorId ? { updatedBy: operatorId } : {}),
+                    },
+                    {
+                        where: { id: activeBookingIds },
+                        transaction: t,
+                    }
+                );
+
+                await TimeSlotStatus.update(
+                    {
+                        status: TimeSlotStatusValue.AVAILABLE,
+                        bookingId: undefined,
+                    },
+                    {
+                        where: { bookingId: activeBookingIds },
+                        transaction: t,
+                    }
+                );
+            });
+        }
+
         await User.findByIdAndDelete(id);
         ctx.body = { success: true };
     } catch (error: any) {
@@ -2086,6 +2166,16 @@ router.post('/bookings', authMiddleware, async (ctx) => {
             throw new CustomError('用户不能为空', ErrorCodes.INVALID_PARAMS);
         }
 
+        // Ensure target user exists (avoid creating orphan bookings)
+        const targetUserById = await User.findById(String(userId))
+            .select('_id')
+            .lean()
+            .catch(() => null);
+        if (!targetUserById) {
+            throw new CustomError('用户不存在', ErrorCodes.USER_NOT_FOUND);
+        }
+        userId = String((targetUserById as any)._id);
+
         // Resolve seatId
         let seatId = data.seatId;
         if (!seatId && data.seatName) {
@@ -2306,6 +2396,38 @@ router.put('/bookings/batch/cancel', authMiddleware, async (ctx) => {
         if (error.isCustom) throw error;
         throw new CustomError(
             'Failed to batch cancel bookings',
+            ErrorCodes.INTERNAL_ERROR
+        );
+    }
+});
+
+router.get('/bookings/orphans', authMiddleware, async (ctx) => {
+    try {
+        requireAdmin(ctx);
+        const result = await repairOrphanActiveBookings({ execute: false });
+        ctx.body = { success: true, data: result };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to inspect orphan bookings',
+            ErrorCodes.INTERNAL_ERROR
+        );
+    }
+});
+
+router.post('/bookings/orphans/repair', authMiddleware, async (ctx) => {
+    try {
+        requireAdmin(ctx);
+        const operatorId = String((ctx as any).state.user?.id || '');
+        const result = await repairOrphanActiveBookings({
+            execute: true,
+            operatorId,
+        });
+        ctx.body = { success: true, data: result };
+    } catch (error: any) {
+        if (error.isCustom) throw error;
+        throw new CustomError(
+            'Failed to repair orphan bookings',
             ErrorCodes.INTERNAL_ERROR
         );
     }
@@ -3414,12 +3536,10 @@ router.get('/dashboard/active-users', authMiddleware, async (ctx) => {
                     username: user?.username || '',
                     bookings: parseInt(r.bookingCount || '0'),
                     lastActive,
-                    avatar:
-                        normalizeUploadUrl(
-                            String(user?.avatar || ''),
-                            ctx.origin
-                        ) ||
-                        `https://api.dicebear.com/7.x/miniavs/svg?seed=${r.userId}`,
+                    avatar: normalizeUploadUrl(
+                        String(user?.avatar || ''),
+                        ctx.origin
+                    ),
                 };
             })
         );

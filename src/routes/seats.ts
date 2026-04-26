@@ -212,7 +212,7 @@ router.get('/floors', async (ctx) => {
         const safePage = Math.max(1, Number(page) || 1);
         const safePageSize = Math.max(
             1,
-            Number(pageSize ?? limit ?? total ?? 1)
+            Math.min(200, Number(pageSize ?? limit ?? 20) || 20)
         );
         const pagedList = list.slice(
             (safePage - 1) * safePageSize,
@@ -509,12 +509,25 @@ router.get('/floor/:floorId', optionalAuthMiddleware, async (ctx) => {
  */
 router.get('/search', optionalAuthMiddleware, async (ctx) => {
     try {
-        const { keyword, date, timeSlot, typeValue, facilityKey } =
-            ctx.query as any;
+        const {
+            keyword,
+            date,
+            timeSlot,
+            typeValue,
+            facilityKey,
+            page,
+            pageSize,
+            limit,
+        } = ctx.query as any;
 
         const normalizedKeyword = String(keyword || '').trim();
         const normalizedTypeValue = String(typeValue || '').trim();
         const normalizedFacilityKey = String(facilityKey || '').trim();
+        const safePage = Math.max(1, Number(page) || 1);
+        const safePageSize = Math.max(
+            1,
+            Math.min(200, Number(pageSize ?? limit ?? 20) || 20)
+        );
 
         const {
             typeValueByCode,
@@ -528,7 +541,12 @@ router.get('/search', optionalAuthMiddleware, async (ctx) => {
             if (!(normalizedTypeValue in typeCodeByValue)) {
                 ctx.body = {
                     success: true,
-                    data: [],
+                    data: {
+                        list: [],
+                        total: 0,
+                        page: safePage,
+                        pageSize: safePageSize,
+                    },
                 };
                 return;
             }
@@ -539,7 +557,12 @@ router.get('/search', optionalAuthMiddleware, async (ctx) => {
         if (normalizedFacilityKey && !facilityField) {
             ctx.body = {
                 success: true,
-                data: [],
+                data: {
+                    list: [],
+                    total: 0,
+                    page: safePage,
+                    pageSize: safePageSize,
+                },
             };
             return;
         }
@@ -594,7 +617,7 @@ router.get('/search', optionalAuthMiddleware, async (ctx) => {
             where[Op.and] = andConditions;
         }
 
-        const seats = await Seat.findAll({
+        const { count, rows } = await Seat.findAndCountAll({
             where,
             include: [
                 {
@@ -603,11 +626,19 @@ router.get('/search', optionalAuthMiddleware, async (ctx) => {
                     as: 'floor',
                 },
             ],
+            order: [
+                ['floorId', 'ASC'],
+                ['rowNum', 'ASC'],
+                ['colNum', 'ASC'],
+                ['id', 'ASC'],
+            ],
+            offset: (safePage - 1) * safePageSize,
+            limit: safePageSize,
         });
 
         const currentUserId = (ctx as any).state.user?.id;
         const results = await Promise.all(
-            seats.map(async (seat) => {
+            rows.map(async (seat) => {
                 let status = getSeatAvailabilityStatus(seat.status);
                 let isMine = false;
 
@@ -667,7 +698,12 @@ router.get('/search', optionalAuthMiddleware, async (ctx) => {
 
         ctx.body = {
             success: true,
-            data: results,
+            data: {
+                list: results,
+                total: Number(count || 0),
+                page: safePage,
+                pageSize: safePageSize,
+            },
         };
     } catch (error: any) {
         if (error.isCustom) throw error;

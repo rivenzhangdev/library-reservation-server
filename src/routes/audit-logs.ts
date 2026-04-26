@@ -15,7 +15,10 @@ router.get('/', authMiddleware, adminMiddleware, async (ctx) => {
         const {
             action,
             targetType,
+            targetKeyword,
             operatorId,
+            operatorKeyword,
+            operatorRole,
             startDate,
             endDate,
             page,
@@ -25,7 +28,10 @@ router.get('/', authMiddleware, adminMiddleware, async (ctx) => {
         const result = await queryAuditLogs({
             action: action as string,
             targetType: targetType as string,
+            targetKeyword: targetKeyword as string,
             operatorId: operatorId as string,
+            operatorKeyword: operatorKeyword as string,
+            operatorRole: operatorRole as string,
             startDate: startDate as string,
             endDate: endDate as string,
             page: page ? Number(page) : undefined,
@@ -55,13 +61,24 @@ router.get('/', authMiddleware, adminMiddleware, async (ctx) => {
  */
 router.get('/export', authMiddleware, adminMiddleware, async (ctx) => {
     try {
-        const { action, targetType, operatorId, startDate, endDate } =
-            ctx.query;
+        const {
+            action,
+            targetType,
+            targetKeyword,
+            operatorId,
+            operatorKeyword,
+            operatorRole,
+            startDate,
+            endDate,
+        } = ctx.query;
 
         const result = await queryAuditLogs({
             action: action as string,
             targetType: targetType as string,
+            targetKeyword: targetKeyword as string,
             operatorId: operatorId as string,
+            operatorKeyword: operatorKeyword as string,
+            operatorRole: operatorRole as string,
             startDate: startDate as string,
             endDate: endDate as string,
             page: 1,
@@ -69,7 +86,7 @@ router.get('/export', authMiddleware, adminMiddleware, async (ctx) => {
         });
 
         const header =
-            'time,operatorId,operatorRole,action,targetType,targetId,ip\n';
+            'time,operatorId,operatorName,operatorRole,action,targetType,targetId,ip\n';
         const rows = result.list.map((log: any) => {
             const time = log.createdAt
                 ? new Date(log.createdAt).toISOString()
@@ -83,6 +100,7 @@ router.get('/export', authMiddleware, adminMiddleware, async (ctx) => {
             return [
                 time,
                 escape(log.operatorId),
+                escape(log.operatorName),
                 escape(log.operatorRole),
                 escape(log.action),
                 escape(log.targetType),

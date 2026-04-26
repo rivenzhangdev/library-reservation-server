@@ -1,7 +1,12 @@
 import Router from 'koa-router';
 import { authMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
-import { CreditRecord, Feedback, User } from '../models/mongodb';
+import {
+    CreditRecord,
+    Feedback,
+    StudentRegistry,
+    User,
+} from '../models/mongodb';
 import { Floor, Seat } from '../models/mysql';
 import { normalizeUploadUrl, saveBase64Image } from '../utils/upload';
 import { getUserDisplayName } from '../utils/user-display';
@@ -48,6 +53,20 @@ router.get('/profile', authMiddleware, async (ctx) => {
         }
 
         const normalizedUser = user.toObject();
+        if (normalizedUser.studentId) {
+            const registryRecord = await StudentRegistry.findOne(
+                { studentId: normalizedUser.studentId, active: true },
+                { college: 1, major: 1, grade: 1, realName: 1 }
+            ).lean();
+            if (registryRecord) {
+                (normalizedUser as any).studentProfile = {
+                    realName: registryRecord.realName,
+                    college: registryRecord.college,
+                    major: (registryRecord as any).major,
+                    grade: registryRecord.grade,
+                };
+            }
+        }
         delete (normalizedUser as any).isSuperAdmin;
         normalizedUser.avatar = normalizeUploadUrl(
             String(normalizedUser.avatar || ''),
@@ -76,7 +95,8 @@ router.put('/profile', authMiddleware, async (ctx) => {
     try {
         assertNotReadOnlySuperAdmin(ctx);
         const userId = (ctx as any).state.user.id;
-        const { name, avatar, username, phone } = ctx.request.body as any;
+        const { name, avatar, username, phone, email } = ctx.request
+            .body as any;
 
         const updateData: any = {};
         if (name !== undefined) updateData.name = name;
@@ -99,6 +119,28 @@ router.put('/profile', authMiddleware, async (ctx) => {
                 );
             }
             updateData.username = normalizedUsername;
+        }
+        if (email !== undefined) {
+            const normalizedEmail = String(email).trim();
+            if (normalizedEmail) {
+                if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+                    throw new CustomError(
+                        'Invalid email address',
+                        ErrorCodes.INVALID_PARAMS
+                    );
+                }
+                const existingEmailUser = await User.findOne({
+                    email: normalizedEmail,
+                    _id: { $ne: userId },
+                });
+                if (existingEmailUser) {
+                    throw new CustomError(
+                        'Email address already exists',
+                        ErrorCodes.INVALID_PARAMS
+                    );
+                }
+                updateData.email = normalizedEmail;
+            }
         }
         if (phone !== undefined) {
             const normalizedPhone = String(phone).trim();

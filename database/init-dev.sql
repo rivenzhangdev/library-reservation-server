@@ -93,6 +93,32 @@ INSERT INTO time_slot_config (time_slot, value, label, start_time, end_time, `or
   (1, 'afternoon', '下午', '13:00', '17:00', 1, TRUE),
   (2, 'evening', '晚上', '18:00', '22:00', 2, TRUE);
 
+-- 创建 booking_rule_config 表 (预约规则配置)
+CREATE TABLE IF NOT EXISTS booking_rule_config (
+  id INT PRIMARY KEY AUTO_INCREMENT COMMENT '规则 ID',
+  rule_key VARCHAR(100) NOT NULL UNIQUE COMMENT '规则键',
+  rule_value VARCHAR(500) NOT NULL COMMENT '规则值',
+  description VARCHAR(500) COMMENT '规则描述',
+  category ENUM('booking','renewal','cancel','general') NOT NULL DEFAULT 'general' COMMENT '规则分类',
+  enabled BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否启用',
+  created_by VARCHAR(255) COMMENT '创建人',
+  updated_by VARCHAR(255) COMMENT '更新人',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='预约规则配置表';
+
+INSERT IGNORE INTO booking_rule_config (rule_key, rule_value, description, category, enabled) VALUES
+  ('max_booking_per_day', '3', '每人每天最大预约次数', 'booking', TRUE),
+  ('max_booking_duration_hours', '4', '单次预约最大时长（小时）', 'booking', TRUE),
+  ('advance_booking_days', '7', '可提前预约天数', 'booking', TRUE),
+  ('cancel_before_minutes', '30', '预约开始前 N 分钟内视为临近取消；若迟取消扣分大于 0，则允许取消并扣分，否则禁止取消', 'cancel', TRUE),
+  ('late_cancel_penalty_credit', '5', '临近开始时取消所扣信用分（设为 0 表示窗口内禁止取消）', 'cancel', TRUE),
+  ('renewal.maxExtraSlots', '2', '每个预约最大续约次数', 'renewal', TRUE),
+  ('renewal.advanceDays', '0', '可提前续约天数（0 表示仅预约当天可续约）', 'renewal', TRUE),
+  ('change_request.maxPerBooking', '3', '每条预约可提交的变更申请总次数上限', 'general', TRUE),
+  ('renewal_extend_minutes', '60', '续约延长分钟数', 'renewal', TRUE),
+  ('checkin_window_minutes', '15', '签到窗口期（分钟）', 'general', TRUE);
+
 -- 插入示例数据
 -- 插入楼层数据
 INSERT INTO floors (name, description, total_seats) VALUES

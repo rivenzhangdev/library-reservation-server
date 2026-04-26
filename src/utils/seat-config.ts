@@ -48,7 +48,7 @@ export const DEFAULT_SEAT_TYPE_CONFIG: SeatTypeConfigItem[] = [
     {
         type: SeatType.SINGLE,
         value: 'single',
-        label: 'Single',
+        label: '单人座',
         icon: 'location-o',
         order: 0,
         enabled: true,
@@ -56,7 +56,7 @@ export const DEFAULT_SEAT_TYPE_CONFIG: SeatTypeConfigItem[] = [
     {
         type: SeatType.DOUBLE,
         value: 'double',
-        label: 'Double',
+        label: '双人座',
         icon: 'friends-o',
         order: 1,
         enabled: true,
@@ -64,7 +64,7 @@ export const DEFAULT_SEAT_TYPE_CONFIG: SeatTypeConfigItem[] = [
     {
         type: SeatType.GROUP,
         value: 'group',
-        label: 'Group',
+        label: '多人座',
         icon: 'cluster-o',
         order: 2,
         enabled: true,
@@ -74,14 +74,14 @@ export const DEFAULT_SEAT_TYPE_CONFIG: SeatTypeConfigItem[] = [
 export const DEFAULT_SEAT_FACILITY_CONFIG: SeatFacilityConfigItem[] = [
     {
         key: 'power',
-        label: 'Socket',
+        label: '插座',
         icon: 'underway-o',
         order: 0,
         enabled: true,
     },
     {
         key: 'window',
-        label: 'Window seat',
+        label: '靠窗座',
         icon: 'photo-o',
         order: 1,
         enabled: true,

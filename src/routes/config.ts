@@ -227,8 +227,7 @@ router.post('/time-slots', authMiddleware, async (ctx) => {
             endTime,
             order: Number.isFinite(Number(order)) ? Number(order) : 0,
             enabled: typeof enabled === 'boolean' ? enabled : true,
-            createdBy: (ctx as any).state.user?.username || null,
-            updatedBy: (ctx as any).state.user?.username || null,
+            ...buildAuditFields(ctx),
         });
 
         ctx.body = {
@@ -276,7 +275,7 @@ router.put('/time-slots/:id', authMiddleware, async (ctx) => {
                 ? Number(order)
                 : config.order,
             enabled: typeof enabled === 'boolean' ? enabled : config.enabled,
-            updatedBy: (ctx as any).state.user?.username || config.updatedBy,
+            ...buildUpdatedBy(ctx),
         });
 
         ctx.body = {
@@ -392,8 +391,7 @@ router.post('/seat-types', authMiddleware, async (ctx) => {
             icon: normalizeIconValue(icon),
             order: Number.isFinite(Number(order)) ? Number(order) : 0,
             enabled: typeof enabled === 'boolean' ? enabled : true,
-            createdBy: (ctx as any).state.user?.username || null,
-            updatedBy: (ctx as any).state.user?.username || null,
+            ...buildAuditFields(ctx),
         });
 
         ctx.body = {
@@ -466,7 +464,7 @@ router.put('/seat-types/:id', authMiddleware, async (ctx) => {
                 ? Number(order)
                 : config.order,
             enabled: typeof enabled === 'boolean' ? enabled : config.enabled,
-            updatedBy: (ctx as any).state.user?.username || config.updatedBy,
+            ...buildUpdatedBy(ctx),
         });
 
         ctx.body = {
@@ -550,8 +548,7 @@ router.post('/seat-facilities', authMiddleware, async (ctx) => {
             icon: normalizeIconValue(icon),
             order: Number.isFinite(Number(order)) ? Number(order) : 0,
             enabled: typeof enabled === 'boolean' ? enabled : true,
-            createdBy: (ctx as any).state.user?.username || null,
-            updatedBy: (ctx as any).state.user?.username || null,
+            ...buildAuditFields(ctx),
         });
 
         ctx.body = {
@@ -600,7 +597,7 @@ router.put('/seat-facilities/:id', authMiddleware, async (ctx) => {
                 ? Number(order)
                 : config.order,
             enabled: typeof enabled === 'boolean' ? enabled : config.enabled,
-            updatedBy: (ctx as any).state.user?.username || config.updatedBy,
+            ...buildUpdatedBy(ctx),
         });
 
         ctx.body = {

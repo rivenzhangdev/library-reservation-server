@@ -2,6 +2,7 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IAuditLog extends Document {
     operatorId: string;
+    operatorName?: string;
     operatorRole: string;
     action: string;
     targetType: string;
@@ -21,6 +22,10 @@ const AuditLogSchema = new Schema<IAuditLog>(
             required: true,
             index: true,
             comment: '操作人 User._id',
+        },
+        operatorName: {
+            type: String,
+            comment: '操作人显示名（快照）',
         },
         operatorRole: {
             type: String,

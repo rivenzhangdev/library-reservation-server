@@ -1,212 +1,123 @@
-# 图书馆座位预约系统 - 后端服务
+# 后端服务说明
 
-## 📁 项目结构
+本项目是图书馆预约系统后端，基于 Koa + TypeScript，提供预约、续约、签到签退、通知、活动、审批、规则配置等接口。
 
-```
-server/
-├── scripts/              # 可执行脚本工具
-│   ├── switch-env.js    # 环境切换工具
-│   └── serve-swagger.js # Swagger UI 服务器
-├── tools/                # 开发和测试工具
-│   ├── init-mongodb.js  # MongoDB 初始化脚本
-│   └── test-all-apis.ps1 # API 接口测试工具 (PowerShell)
-├── test/                 # 测试相关文件
-│   └── swagger-*.json   # Swagger API 文档
-├── database/             # SQL 初始化脚本
-│   └── *.sql            # 各环境数据库表结构定义
-├── src/                  # 源代码目录
-│   ├── app.ts           # 应用入口
-│   ├── routes/          # 路由控制器
-│   ├── models/          # 数据模型
-│   ├── middleware/      # 中间件
-│   ├── database/        # 数据库配置
-│   └── utils/           # 工具函数
-└── .env.example         # 环境变量模板
-```
+## 1. 技术栈
 
-## 🔐 安全配置说明
+-   Node.js + TypeScript
+-   Koa
+-   Sequelize + MySQL
+-   Mongoose + MongoDB
 
-### 环境变量管理
+## 2. 目录结构
 
-**重要**: 所有敏感信息（微信 AppSecret、数据库密码、JWT 密钥等）都已从版本控制中移除。
+-   src：业务源码
+-   src/routes：接口路由
+-   src/services：业务服务层
+-   src/models：MySQL 与 MongoDB 模型
+-   src/utils：工具函数与规则解析
+-   database：数据库初始化与迁移脚本
+-   scripts：运维和开发脚本
+-   test：接口与规则测试
 
-#### 配置步骤:
+## 3. 环境变量
 
-1. **复制环境变量模板**
+请先复制模板：
 
-```bash
 cp .env.example .env
-```
 
-2. **编辑 `.env` 文件，填入实际值:**
+建议按环境维护以下文件：
 
-```env
-# 微信配置 - 需在微信公众平台注册获取
-WX_APP_ID=你的小程序 AppID
-WX_APP_SECRET=你的小程序 AppSecret
-WECHAT_TEMPLATE_BOOKING_SUCCESS=你环境下的打卡提醒模板 ID
-WECHAT_TEMPLATE_BOOKING_REMINDER=你环境下的签到提醒模板 ID
+-   .env.development
+-   .env.test
+-   .env.uat
+-   .env.production
 
-# JWT 密钥 - 生产环境务必使用强随机字符串
-JWT_SECRET=你的 JWT 密钥
+关键变量：
 
-# MySQL 配置
-DB_MYSQL_PASSWORD=你的 MySQL 密码
+-   NODE_ENV
+-   PORT
+-   DB_MYSQL_HOST / DB_MYSQL_PORT / DB_MYSQL_DATABASE / DB_MYSQL_USERNAME / DB_MYSQL_PASSWORD
+-   DB_MONGODB_URI
+-   JWT_SECRET
+-   WX_APP_ID / WX_APP_SECRET
 
-# MongoDB 配置
-DB_MONGODB_URI=mongodb://localhost:27017/library_booking_dev
-```
+## 4. 数据库初始化
 
-> 真实的 `WECHAT_TEMPLATE_BOOKING_SUCCESS` 和 `WECHAT_TEMPLATE_BOOKING_REMINDER` 应当写入每个环境对应的配置文件，例如 `.env.development`, `.env.test`, `.env.uat`, `.env.production`。`
+开发环境初始化：
 
-3. **获取微信 AppID 和 Secret:**
-    - 访问 [微信公众平台](https://mp.weixin.qq.com/)
-    - 注册小程序账号
-    - 在"开发" -> "开发管理" -> "开发设置" 中获取
-    - 或使用测试号：[微信测试号申请](https://developers.weixin.qq.com/miniprogram/dev/framework/customize/samecity.html)
+mysql -u root -p < database/init-dev.sql
 
-### 多环境配置
+UAT 环境初始化：
 
-项目支持四套环境，每套环境有独立的配置文件:
+mysql -u root -p < database/init-uat.sql
 
-| 环境     | 配置文件           | 端口 | 数据库               |
-| -------- | ------------------ | ---- | -------------------- |
-| 开发环境 | `.env.development` | 3000 | library_booking_dev  |
-| 测试环境 | `.env.test`        | 3001 | library_booking_test |
-| UAT 环境 | `.env.uat`         | 3002 | library_booking_uat  |
-| 生产环境 | `.env.production`  | 3003 | library_booking_prod |
+生产环境初始化：
 
-**注意**: 所有 `.env*` 配置文件都不会提交到 Git，每个开发者需要自行配置。
+mysql -u root -p < database/init-production.sql
 
-### MySQL 日志输出控制
+MongoDB 初始化：
 
-开发时我们在启动过程中会打印 Sequelize 执行的 SQL 语句（用于调试）。如果你不希望在控制台看到这些 SQL 日志，可以通过环境变量 `MYSQL_LOGGING` 控制：
-
--   在 `.env.development`（或你当前使用的环境文件）中添加 `MYSQL_LOGGING=false` 来关闭 SQL 日志。
--   要开启日志（显示 SQL），设置为 `MYSQL_LOGGING=true`。
-
-示例：
-
-```ini
-# 关闭 SQL 输出
-MYSQL_LOGGING=false
-```
-
-默认行为：如果未设置 `MYSQL_LOGGING`，开发环境（`NODE_ENV=development`）下会默认打印 SQL 日志，以便调试。
-
-## 🚀 快速开始
-
-### 1. 安装依赖
-
-```bash
-pnpm install
-```
-
-### 2. 初始化数据库
-
-**MySQL:**
-
-```bash
-pnpm db:init
-# 或重置数据库
-pnpm db:reset
-```
-
-**MongoDB:**
-
-```bash
 pnpm db:mongo:init
-# 如需仅补齐默认超级管理员
-pnpm db:mongo:ensure-admin
-```
 
-### 3. 配置环境变量
+## 5. 启动与脚本
 
-```bash
-# 复制模板
-cp .env.example .env
+安装依赖：
 
-# 编辑 .env 文件，填入你的微信 AppID、AppSecret 等配置
-```
+pnpm install
 
-### 4. 启动服务
+开发启动：
 
-**方式一：直接启动**
+pnpm start:dev
 
-```bash
-pnpm dev
-```
+测试环境启动：
 
-**方式二：使用环境切换工具**
+pnpm start:test
 
-```bash
-# 查看当前环境
-pnpm switch:env
+UAT 启动：
 
-# 切换到开发环境并启动
-node scripts/switch-env.js dev --start
-# 或简写
-pnpm switch:env:dev
-```
+pnpm start:uat
 
-### 5. 查看 API 文档
+生产启动：
 
-```bash
-pnpm swagger
-# 访问 http://localhost:<PORT>/swagger
-```
+pnpm start:prod
 
-## 🧪 测试
+常用命令：
 
-### API 接口测试
+-   pnpm lint
+-   pnpm lint:fix
+-   pnpm format
+-   pnpm test
+-   pnpm swagger
+-   pnpm generate:swagger
 
-使用 PowerShell 运行自动化测试脚本:
+## 6. Swagger 文档
 
-```powershell
-.\tools\test-all-apis.ps1
-```
+-   生成脚本：[src/generate-swagger-full.ts](src/generate-swagger-full.ts)
+-   产物文件：[swagger-full.json](swagger-full.json)
+-   本地查看：pnpm swagger
 
-### 代码检查
+本次已对预约接口文档做了同步更新：
 
-```bash
-# ESLint 检查
-pnpm lint
+-   我的预约列表返回字段与实际实现保持一致（list, pageSize）
+-   增加续约窗口相关字段（renewalAdvanceDays, renewalBlockedReason）
+-   续约接口补充常见失败场景说明
 
-# 自动修复格式问题
-pnpm lint:fix
+## 7. 续约规则说明
 
-# Prettier 格式化
-pnpm format
-```
+-   renewal.maxExtraSlots：单条预约最多可续约的时段数
+-   renewal.advanceDays：可提前续约天数
 
-## 📝 常用命令
+规则示例：
 
-| 命令                         | 说明                          |
-| ---------------------------- | ----------------------------- |
-| `pnpm dev`                   | 启动开发服务器 (热重载)       |
-| `pnpm build`                 | 编译 TypeScript 到 JavaScript |
-| `pnpm start`                 | 启动生产环境服务              |
-| `pnpm switch:env`            | 查看/切换环境                 |
-| `pnpm switch:env:dev`        | 切换到开发环境并启动          |
-| `pnpm switch:env:test`       | 切换到测试环境并启动          |
-| `pnpm switch:env:uat`        | 切换到 UAT 环境并启动         |
-| `pnpm switch:env:prod`       | 切换到生产环境并启动          |
-| `pnpm db:init`               | 初始化 MySQL 数据库           |
-| `pnpm db:mongo:init`         | 初始化 MongoDB 数据库         |
-| `pnpm db:mongo:ensure-admin` | 仅补齐/更新默认超级管理员     |
-| `pnpm swagger`               | 启动 Swagger UI 文档服务      |
-| `pnpm generate:swagger`      | 重新生成 Swagger API 文档     |
-| `pnpm config:env`            | 交互式配置环境变量            |
-| `pnpm config:env:check`      | 检查环境配置状态              |
+-   renewal.advanceDays = 0：仅预约当天可续约
+-   renewal.advanceDays = 1：可在预约当天和前 1 天续约
 
-## 🔒 安全最佳实践
+续约资格由后端统一判定，并通过接口返回不可续约原因。
 
-1. **永不提交敏感信息**: 所有包含真实密码、密钥的配置文件都已添加到 `.gitignore`
-2. **使用环境变量**: 生产环境通过 CI/CD 系统注入环境变量
-3. **定期更换密钥**: JWT_SECRET 等密钥应定期更换
-4. **最小权限原则**: 数据库账号仅授予必要权限
-5. **HTTPS**: 生产环境必须使用 HTTPS 传输
+## 8. 质量与发布检查
 
-## 📄 License
-
-MIT
+1. 变更接口后执行 pnpm generate:swagger
+2. 执行 pnpm lint 与核心用例测试
+3. 检查规则默认值与数据库脚本一致
+4. 发布前确认生产环境变量完整且密钥已替换

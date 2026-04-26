@@ -28,11 +28,16 @@ import uploadsRoutes from './routes/uploads';
 import uploadsAdminRoutes from './routes/uploads-admin';
 import studentIdChangeRequestsRoutes from './routes/studentIdChangeRequests';
 import phoneChangeRequestsRoutes from './routes/phoneChangeRequests';
+import studentRegistryRoutes from './routes/studentRegistry';
 import bookingRulesRoutes from './routes/booking-rules';
 import bookingChangeRequestsRoutes from './routes/booking-change-requests';
 import auditLogRoutes from './routes/audit-logs';
 import dashboardRoutes from './routes/dashboard';
-import { markAllExpiredActivities } from './services/activity-service';
+import {
+    markAllExpiredActivities,
+    refreshActivityStatusesSafely,
+    startActivityStatusRefreshTask,
+} from './services/activity-service';
 
 // 导入数据库连接
 import { testConnection, syncDatabase } from './database/mysql';
@@ -159,6 +164,14 @@ app.use(userRoutes.routes()).use(userRoutes.allowedMethods());
 
 app.use(seatRoutes.routes()).use(seatRoutes.allowedMethods());
 
+// 必须在 bookingRoutes 之前注册，避免 /api/booking/:id 抢先匹配 /api/booking/change-requests
+app.use(bookingChangeRequestsRoutes.routes()).use(
+    bookingChangeRequestsRoutes.allowedMethods()
+);
+
+// 必须在 bookingRoutes 之前注册，避免 /api/booking/:id 抢先匹配 /api/booking/rules
+app.use(bookingRulesRoutes.routes()).use(bookingRulesRoutes.allowedMethods());
+
 app.use(bookingRoutes.routes()).use(bookingRoutes.allowedMethods());
 
 app.use(configRoutes.routes()).use(configRoutes.allowedMethods());
@@ -181,12 +194,11 @@ app.use(studentIdChangeRequestsRoutes.routes()).use(
 app.use(phoneChangeRequestsRoutes.routes()).use(
     phoneChangeRequestsRoutes.allowedMethods()
 );
+app.use(studentRegistryRoutes.routes()).use(
+    studentRegistryRoutes.allowedMethods()
+);
 
 // 企业增强功能路由
-app.use(bookingRulesRoutes.routes()).use(bookingRulesRoutes.allowedMethods());
-app.use(bookingChangeRequestsRoutes.routes()).use(
-    bookingChangeRequestsRoutes.allowedMethods()
-);
 app.use(auditLogRoutes.routes()).use(auditLogRoutes.allowedMethods());
 app.use(dashboardRoutes.routes()).use(dashboardRoutes.allowedMethods());
 
@@ -216,6 +228,21 @@ async function startServer() {
         // 立即执行一次过期预约和活动扫描，补齐被动触发缺口
         await markAllExpiredBookings();
         await markAllExpiredActivities();
+        await refreshActivityStatusesSafely();
+
+        const activityStatusRefreshIntervalMinutes = Number(
+            process.env.ACTIVITY_STATUS_REFRESH_INTERVAL_MINUTES || 1
+        );
+        if (activityStatusRefreshIntervalMinutes > 0) {
+            startActivityStatusRefreshTask(
+                activityStatusRefreshIntervalMinutes
+            );
+        } else {
+            console.log(
+                'Activity status refresh scheduler disabled by ACTIVITY_STATUS_REFRESH_INTERVAL_MINUTES <= 0'
+            );
+        }
+
         const violationScanIntervalMinutes = Number(
             process.env.VIOLATION_SCAN_INTERVAL_MINUTES || 15
         );

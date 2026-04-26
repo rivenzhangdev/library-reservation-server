@@ -20,6 +20,7 @@ type UpdateCall = {
 };
 
 export async function runTests() {
+  await testReleaseBookingTimeSlotByBookingId();
   await testReleaseBookingTimeSlot();
   await testReleaseBookingTimeSlotWithTransaction();
   testValidateBookingRequest();
@@ -33,6 +34,25 @@ export async function runTests() {
   await testPerformBookingRenewConflict();
   await testPerformBookingRenewLimitExceeded();
   await testBuildRenewBookingDataForAfternoon();
+}
+
+async function testReleaseBookingTimeSlotByBookingId() {
+  const calls: UpdateCall[] = [];
+  const originalUpdate = (TimeSlotStatus as any).update;
+  (TimeSlotStatus as any).update = async (values: any, options: any) => {
+    calls.push({ values, options });
+    return [2];
+  };
+
+  try {
+    await releaseBookingTimeSlot({ id: 999, seatId: 123, date: '2026-04-15', timeSlot: 0 });
+    assert.strictEqual(calls.length, 1);
+    assert.deepStrictEqual(calls[0].options.where, {
+      bookingId: 999,
+    });
+  } finally {
+    (TimeSlotStatus as any).update = originalUpdate;
+  }
 }
 
 async function testReleaseBookingTimeSlot() {
@@ -146,6 +166,7 @@ async function testMarkAllExpiredBookings() {
 
 async function testPerformBookingCheckin() {
   const now = new Date();
+  const future = new Date(now.getTime() + 60 * 60 * 1000);
   const booking = {
     id: 3,
     userId: 'user123',
@@ -153,7 +174,7 @@ async function testPerformBookingCheckin() {
     date: now.toISOString().split('T')[0],
     timeSlot: 0,
     startTime: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
-    endTime: `${String(now.getHours() + 1).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
+    endTime: `${String(future.getHours()).padStart(2, '0')}:${String(future.getMinutes()).padStart(2, '0')}`,
     update: async function (values: any) {
       Object.assign(this, values);
       return this;

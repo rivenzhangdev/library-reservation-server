@@ -14,6 +14,17 @@ export function isLikelyWechatIdentifier(value?: string): boolean {
     );
 }
 
+function isPlaceholderBenchUserName(value?: string): boolean {
+    const normalized = String(value || '')
+        .trim()
+        .toLowerCase();
+    return (
+        normalized === 'bench user' ||
+        normalized === 'bench_user' ||
+        normalized === 'bench-user'
+    );
+}
+
 export function getUserDisplayName(user?: {
     name?: string;
     username?: string;
@@ -23,7 +34,7 @@ export function getUserDisplayName(user?: {
     if (username) return username;
 
     const name = String(user.name || '').trim();
-    if (name) return name;
+    if (name && !isPlaceholderBenchUserName(name)) return name;
 
     return undefined;
 }
