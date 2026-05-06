@@ -13,7 +13,11 @@ import {
     TimeSlotStatusValue,
 } from '../models/mysql/types';
 import { User } from '../models/mongodb';
-import { authMiddleware, adminMiddleware } from '../middleware/auth';
+import {
+    authMiddleware,
+    adminMiddleware,
+    ensureNotBlacklisted,
+} from '../middleware/auth';
 import { ErrorCodes } from '../utils/error-codes';
 import { writeAuditLog } from '../services/audit-service';
 import { buildAuditFields } from '../utils/audit';
@@ -23,8 +27,8 @@ import { formatRouteDateTimes } from '../utils/route-time-serializer';
 import { Op } from 'sequelize';
 import { getBookingEndSlot } from '../services/booking-service';
 import {
+    getTimeSlotConfigItem,
     getTimeSlotConfigItems,
-    resolveTimeSlot,
 } from '../utils/time-slot-config';
 import { getBookingRuleNumber } from './booking-rules';
 
@@ -130,8 +134,8 @@ async function enrichRequestDisplayFields(items: any[]) {
         const slot = Number(config?.timeSlot);
         if (!Number.isInteger(slot) || slot < 0) continue;
         const label = String(config?.label || '').trim();
-        const start = normalizeTimeText(config?.startTime || config?.start);
-        const end = normalizeTimeText(config?.endTime || config?.end);
+        const start = normalizeTimeText(config?.startTime);
+        const end = normalizeTimeText(config?.endTime);
         const rangeText = start && end ? `${start}-${end}` : '';
         slotLabelMap[slot] =
             [label, rangeText].filter(Boolean).join(' ').trim() || String(slot);
@@ -250,7 +254,7 @@ function isTargetSlotAlreadyPast(
     if (targetDate.getTime() > today.getTime()) return false;
     if (targetDate.getTime() < today.getTime()) return true;
 
-    const slotConfig = resolveTimeSlot(slotConfigs, targetSlot);
+    const slotConfig = getTimeSlotConfigItem(targetSlot, slotConfigs);
     const endMinutes = parseClockMinutes(String(slotConfig?.endTime || ''));
     if (endMinutes === null) {
         return false;
@@ -264,6 +268,7 @@ function isTargetSlotAlreadyPast(
  */
 router.post('/', authMiddleware, async (ctx) => {
     try {
+        ensureNotBlacklisted(ctx);
         const user = (ctx as any).state.user;
         const {
             bookingId,
@@ -1096,13 +1101,13 @@ router.put('/:id/approve', authMiddleware, adminMiddleware, async (ctx) => {
                 }
             }
 
-            const targetStartConfig = resolveTimeSlot(
-                timeSlotConfigs,
-                targetStartSlot
+            const targetStartConfig = getTimeSlotConfigItem(
+                targetStartSlot,
+                timeSlotConfigs
             );
-            const targetEndConfig = resolveTimeSlot(
-                timeSlotConfigs,
-                targetEndSlot
+            const targetEndConfig = getTimeSlotConfigItem(
+                targetEndSlot,
+                timeSlotConfigs
             );
 
             const fallbackStartTime = normalizeTimeText(booking.startTime);

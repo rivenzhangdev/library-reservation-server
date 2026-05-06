@@ -12,6 +12,7 @@ export interface IFeedback extends Document {
     images?: string[];
     status: number; // 1:pending,2:processing,3:resolved,4:rejected
     reply?: string;
+    remark?: string;
     repliedBy?: mongoose.Types.ObjectId;
     replyAt?: Date;
     processedBy?: mongoose.Types.ObjectId;
@@ -56,9 +57,9 @@ const feedbackSchema = new Schema<IFeedback>(
             default: 1,
         },
         reply: String,
+        remark: String,
         repliedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         replyAt: Date,
-        processedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         processedAt: Date,
         processedReason: String,

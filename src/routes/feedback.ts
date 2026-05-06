@@ -1,9 +1,5 @@
 import Router from 'koa-router';
-import {
-    adminMiddleware,
-    authMiddleware,
-    optionalAuthMiddleware,
-} from '../middleware/auth';
+import { adminMiddleware, authMiddleware } from '../middleware/auth';
 import { CustomError } from '../middleware/error';
 import { Feedback, User } from '../models/mongodb';
 import { normalizeNumericEnum } from '../utils/enum-normalizers';

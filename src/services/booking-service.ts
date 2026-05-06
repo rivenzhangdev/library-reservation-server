@@ -270,6 +270,8 @@ export async function performBookingCheckin(
     userId: string,
     creditRecordModel = CreditRecord
 ): Promise<void> {
+    void userId;
+    void creditRecordModel;
     if (!booking) {
         throw new CustomError(
             'Booking not found',
@@ -519,7 +521,9 @@ export async function performBookingRenew(
     }
     const slotConfigs = await getTimeSlotConfigItems();
     const orderedTimeSlots = getChronologicalTimeSlots(slotConfigs)
-        .map((item) => Number(item.timeSlot))
+        .map((item: any) =>
+            typeof item === 'number' ? Number(item) : Number(item?.timeSlot)
+        )
         .filter((slot) => Number.isInteger(slot))
         .filter((slot, index, array) => array.indexOf(slot) === index);
     const timeSlotIndexMap = new Map<number, number>(

@@ -441,7 +441,10 @@ export async function createBooking(ctx: any) {
     }
 }
 
-router.post('/', authMiddleware, createBooking);
+router.post('/', authMiddleware, async (ctx) => {
+    ensureNotBlacklisted(ctx);
+    await createBooking(ctx);
+});
 
 /**
                                 }
@@ -913,6 +916,7 @@ async function getGeofenceConfig(): Promise<{
 
 export async function checkinBooking(ctx: any) {
     try {
+        ensureNotBlacklisted(ctx);
         const bookingId = ctx.params.id;
         const userId = (ctx as any).state.user.id;
 

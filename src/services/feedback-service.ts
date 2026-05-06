@@ -4,6 +4,7 @@ import { getUserDisplayName } from '../utils/user-display';
 import { ErrorCodes } from '../utils/error-codes';
 import { FeedbackStatus } from '../constants/feedback';
 import { Roles } from '../constants/roles';
+import { normalizeNumericEnum } from '../utils/enum-normalizers';
 import { CustomError } from '../middleware/error';
 
 interface FeedbackListFilters {
@@ -97,7 +98,7 @@ export async function listFeedback(
     return { total, feedbacks };
 }
 
-export async function getFeedbackDetail(id: string, user: any) {
+export async function getFeedbackDetail(id: string, user: any): Promise<any> {
     const filter: any = { _id: id };
     const requesterId = user?.id || user?._id;
     if (user?.role !== Roles.ADMIN) {
@@ -128,11 +129,16 @@ export async function processFeedback(
     id: string,
     status: string,
     remark: string,
-    user: any,
+    _user: any,
     ctx: any
 ) {
     if (!status) {
         throw new CustomError('Missing status', ErrorCodes.INVALID_PARAMS);
+    }
+
+    const normalizedStatus = normalizeNumericEnum(status);
+    if (normalizedStatus === undefined) {
+        throw new CustomError('Invalid status', ErrorCodes.INVALID_PARAMS);
     }
 
     const feedback = await Feedback.findById(id);
@@ -150,7 +156,7 @@ export async function processFeedback(
         );
     }
 
-    feedback.status = status;
+    feedback.status = normalizedStatus;
     feedback.remark = remark || feedback.remark;
     Object.assign(feedback, buildUpdatedBy(ctx));
     await feedback.save();

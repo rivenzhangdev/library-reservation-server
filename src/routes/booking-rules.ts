@@ -1,5 +1,6 @@
 import Router from 'koa-router';
 import { BookingRuleConfig } from '../models/mysql';
+import { BookingRuleCategory } from '../models/mysql/types';
 import { User } from '../models/mongodb';
 import { authMiddleware, adminMiddleware } from '../middleware/auth';
 import { ErrorCodes } from '../utils/error-codes';
@@ -14,42 +15,42 @@ const DEFAULT_BOOKING_RULES: Array<{
     ruleKey: string;
     ruleValue: string;
     description: string;
-    category: 'booking' | 'renewal' | 'cancel' | 'general';
+    category: BookingRuleCategory;
     enabled: boolean;
 }> = [
     {
         ruleKey: 'advance_booking_days',
         ruleValue: '7',
         description: '可提前预约天数',
-        category: 'booking',
+        category: BookingRuleCategory.BOOKING,
         enabled: true,
     },
     {
         ruleKey: 'max_booking_duration_hours',
         ruleValue: '4',
         description: '单次预约最大时长（小时）',
-        category: 'booking',
+        category: BookingRuleCategory.BOOKING,
         enabled: true,
     },
     {
         ruleKey: 'max_booking_per_day',
         ruleValue: '3',
         description: '每人每天最大预约次数',
-        category: 'booking',
+        category: BookingRuleCategory.BOOKING,
         enabled: true,
     },
     {
         ruleKey: 'renewal.maxExtraSlots',
         ruleValue: '2',
         description: '每个预约最大续约次数',
-        category: 'renewal',
+        category: BookingRuleCategory.RENEWAL,
         enabled: true,
     },
     {
         ruleKey: 'renewal.advanceDays',
         ruleValue: '0',
         description: '可提前续约天数（0 表示仅预约当天可续约）',
-        category: 'renewal',
+        category: BookingRuleCategory.RENEWAL,
         enabled: true,
     },
     {
@@ -57,28 +58,28 @@ const DEFAULT_BOOKING_RULES: Array<{
         ruleValue: '30',
         description:
             '预约开始前 N 分钟内视为临近取消；若迟取消扣分大于 0，则允许取消并扣分，否则禁止取消',
-        category: 'cancel',
+        category: BookingRuleCategory.CANCEL,
         enabled: true,
     },
     {
         ruleKey: 'late_cancel_penalty_credit',
         ruleValue: '5',
         description: '临近开始时取消所扣信用分（设为 0 表示窗口内禁止取消）',
-        category: 'cancel',
+        category: BookingRuleCategory.CANCEL,
         enabled: true,
     },
     {
         ruleKey: 'checkin_window_minutes',
         ruleValue: '15',
         description: '签到窗口期（分钟）',
-        category: 'general',
+        category: BookingRuleCategory.GENERAL,
         enabled: true,
     },
     {
         ruleKey: 'change_request.maxPerBooking',
         ruleValue: '3',
         description: '每条预约可提交的变更申请总次数上限',
-        category: 'general',
+        category: BookingRuleCategory.GENERAL,
         enabled: true,
     },
 ];

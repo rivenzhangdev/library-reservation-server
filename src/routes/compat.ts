@@ -47,7 +47,7 @@ import { repairOrphanActiveBookings } from '../services/orphan-booking-service';
 const router = new Router({ prefix: '/api' });
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'default_secret';
-import { Roles } from '../constants/roles';
+import { MANAGEMENT_ROLES, Roles } from '../constants/roles';
 import {
     SystemDisplayName,
     ViolationRecordType,
@@ -643,7 +643,10 @@ router.post('/login', async (ctx) => {
             );
         }
 
-        const roleForToken = user.role;
+        const roleForToken = Number(user.role);
+        if (!MANAGEMENT_ROLES.includes(roleForToken as any)) {
+            throw new CustomError('Forbidden', ErrorCodes.FORBIDDEN, 403);
+        }
 
         const token = jwt.sign(
             {

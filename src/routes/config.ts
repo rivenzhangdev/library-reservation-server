@@ -11,7 +11,7 @@ import {
     MIN_CUSTOM_BOOKING_DURATION_MINUTES,
 } from '../utils/booking-rules';
 import { getBookingRuleNumber } from './booking-rules';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, adminMiddleware } from '../middleware/auth';
 import { buildAuditFields, buildUpdatedBy } from '../utils/audit';
 import {
     TimeSlotConfig,
@@ -178,9 +178,9 @@ router.get('/booking-rules', getBookingRules);
 
 router.get('/credit-rules', getCreditRules);
 
-router.put('/credit-rules', authMiddleware, updateCreditRules);
+router.put('/credit-rules', authMiddleware, adminMiddleware, updateCreditRules);
 
-router.post('/time-slots', authMiddleware, async (ctx) => {
+router.post('/time-slots', authMiddleware, adminMiddleware, async (ctx) => {
     try {
         const { timeSlot, value, label, startTime, endTime, order, enabled } =
             ctx.request.body as any;
@@ -243,7 +243,7 @@ router.post('/time-slots', authMiddleware, async (ctx) => {
     }
 });
 
-router.put('/time-slots/:id', authMiddleware, async (ctx) => {
+router.put('/time-slots/:id', authMiddleware, adminMiddleware, async (ctx) => {
     try {
         const id = Number(ctx.params.id);
         const { value, label, startTime, endTime, order, enabled } = ctx.request
@@ -291,31 +291,36 @@ router.put('/time-slots/:id', authMiddleware, async (ctx) => {
     }
 });
 
-router.delete('/time-slots/:id', authMiddleware, async (ctx) => {
-    try {
-        const id = Number(ctx.params.id);
-        const config = await TimeSlotConfig.findByPk(id);
-        if (!config) {
+router.delete(
+    '/time-slots/:id',
+    authMiddleware,
+    adminMiddleware,
+    async (ctx) => {
+        try {
+            const id = Number(ctx.params.id);
+            const config = await TimeSlotConfig.findByPk(id);
+            if (!config) {
+                throw new CustomError(
+                    'Time slot config not found',
+                    ErrorCodes.NOT_FOUND
+                );
+            }
+
+            await config.destroy();
+
+            ctx.body = {
+                success: true,
+                message: 'Deleted successfully',
+            };
+        } catch (error: any) {
+            if (error.isCustom) throw error;
             throw new CustomError(
-                'Time slot config not found',
-                ErrorCodes.NOT_FOUND
+                'Failed to delete time slot configuration',
+                ErrorCodes.INVALID_PARAMS
             );
         }
-
-        await config.destroy();
-
-        ctx.body = {
-            success: true,
-            message: 'Deleted successfully',
-        };
-    } catch (error: any) {
-        if (error.isCustom) throw error;
-        throw new CustomError(
-            'Failed to delete time slot configuration',
-            ErrorCodes.INVALID_PARAMS
-        );
     }
-});
+);
 
 router.get('/seat-types', async (ctx) => {
     try {
@@ -333,7 +338,7 @@ router.get('/seat-types', async (ctx) => {
     }
 });
 
-router.post('/seat-types', authMiddleware, async (ctx) => {
+router.post('/seat-types', authMiddleware, adminMiddleware, async (ctx) => {
     try {
         const { type, value, label, icon, order, enabled } = ctx.request
             .body as any;
@@ -407,7 +412,7 @@ router.post('/seat-types', authMiddleware, async (ctx) => {
     }
 });
 
-router.put('/seat-types/:id', authMiddleware, async (ctx) => {
+router.put('/seat-types/:id', authMiddleware, adminMiddleware, async (ctx) => {
     try {
         const id = Number(ctx.params.id);
         const { type, value, label, icon, order, enabled } = ctx.request
@@ -480,31 +485,36 @@ router.put('/seat-types/:id', authMiddleware, async (ctx) => {
     }
 });
 
-router.delete('/seat-types/:id', authMiddleware, async (ctx) => {
-    try {
-        const id = Number(ctx.params.id);
-        const config = await SeatTypeConfig.findByPk(id);
-        if (!config) {
+router.delete(
+    '/seat-types/:id',
+    authMiddleware,
+    adminMiddleware,
+    async (ctx) => {
+        try {
+            const id = Number(ctx.params.id);
+            const config = await SeatTypeConfig.findByPk(id);
+            if (!config) {
+                throw new CustomError(
+                    'Seat type config not found',
+                    ErrorCodes.NOT_FOUND
+                );
+            }
+
+            await config.destroy();
+
+            ctx.body = {
+                success: true,
+                message: 'Deleted successfully',
+            };
+        } catch (error: any) {
+            if (error.isCustom) throw error;
             throw new CustomError(
-                'Seat type config not found',
-                ErrorCodes.NOT_FOUND
+                'Failed to delete seat type configuration',
+                ErrorCodes.INVALID_PARAMS
             );
         }
-
-        await config.destroy();
-
-        ctx.body = {
-            success: true,
-            message: 'Deleted successfully',
-        };
-    } catch (error: any) {
-        if (error.isCustom) throw error;
-        throw new CustomError(
-            'Failed to delete seat type configuration',
-            ErrorCodes.INVALID_PARAMS
-        );
     }
-});
+);
 
 router.get('/seat-facilities', async (ctx) => {
     try {
@@ -522,121 +532,143 @@ router.get('/seat-facilities', async (ctx) => {
     }
 });
 
-router.post('/seat-facilities', authMiddleware, async (ctx) => {
-    try {
-        const { key, label, icon, order, enabled } = ctx.request.body as any;
-        if (!label) {
+router.post(
+    '/seat-facilities',
+    authMiddleware,
+    adminMiddleware,
+    async (ctx) => {
+        try {
+            const { key, label, icon, order, enabled } = ctx.request
+                .body as any;
+            if (!label) {
+                throw new CustomError(
+                    'Missing required facility parameters',
+                    ErrorCodes.INVALID_PARAMS
+                );
+            }
+
+            if (key) {
+                const exists = await SeatFacilityConfig.findOne({
+                    where: { key },
+                });
+                if (exists) {
+                    throw new CustomError(
+                        'Facility key already exists',
+                        ErrorCodes.INVALID_PARAMS
+                    );
+                }
+            }
+
+            const item = await SeatFacilityConfig.create({
+                key: key || generateConfigIdentifier(),
+                label,
+                icon: normalizeIconValue(icon),
+                order: Number.isFinite(Number(order)) ? Number(order) : 0,
+                enabled: typeof enabled === 'boolean' ? enabled : true,
+                ...buildAuditFields(ctx),
+            });
+
+            ctx.body = {
+                success: true,
+                data: normalizeConfigResponseData(item),
+            };
+        } catch (error: any) {
+            if (error.isCustom) throw error;
             throw new CustomError(
-                'Missing required facility parameters',
+                'Failed to create seat facility configuration',
                 ErrorCodes.INVALID_PARAMS
             );
         }
+    }
+);
 
-        if (key) {
-            const exists = await SeatFacilityConfig.findOne({ where: { key } });
-            if (exists) {
+router.put(
+    '/seat-facilities/:id',
+    authMiddleware,
+    adminMiddleware,
+    async (ctx) => {
+        try {
+            const id = Number(ctx.params.id);
+            const { key, label, icon, order, enabled } = ctx.request
+                .body as any;
+            const config = await SeatFacilityConfig.findByPk(id);
+            if (!config) {
                 throw new CustomError(
-                    'Facility key already exists',
-                    ErrorCodes.INVALID_PARAMS
+                    'Seat facility config not found',
+                    ErrorCodes.NOT_FOUND
                 );
             }
-        }
 
-        const item = await SeatFacilityConfig.create({
-            key: key || generateConfigIdentifier(),
-            label,
-            icon: normalizeIconValue(icon),
-            order: Number.isFinite(Number(order)) ? Number(order) : 0,
-            enabled: typeof enabled === 'boolean' ? enabled : true,
-            ...buildAuditFields(ctx),
-        });
+            if (key && key !== config.key) {
+                const exists = await SeatFacilityConfig.findOne({
+                    where: { key },
+                });
+                if (exists) {
+                    throw new CustomError(
+                        'Facility key already exists',
+                        ErrorCodes.INVALID_PARAMS
+                    );
+                }
+            }
 
-        ctx.body = {
-            success: true,
-            data: normalizeConfigResponseData(item),
-        };
-    } catch (error: any) {
-        if (error.isCustom) throw error;
-        throw new CustomError(
-            'Failed to create seat facility configuration',
-            ErrorCodes.INVALID_PARAMS
-        );
-    }
-});
+            await config.update({
+                key: key ?? config.key,
+                label: label ?? config.label,
+                icon:
+                    typeof icon !== 'undefined'
+                        ? normalizeIconValue(icon)
+                        : config.icon,
+                order: Number.isFinite(Number(order))
+                    ? Number(order)
+                    : config.order,
+                enabled:
+                    typeof enabled === 'boolean' ? enabled : config.enabled,
+                ...buildUpdatedBy(ctx),
+            });
 
-router.put('/seat-facilities/:id', authMiddleware, async (ctx) => {
-    try {
-        const id = Number(ctx.params.id);
-        const { key, label, icon, order, enabled } = ctx.request.body as any;
-        const config = await SeatFacilityConfig.findByPk(id);
-        if (!config) {
+            ctx.body = {
+                success: true,
+                data: normalizeConfigResponseData(config),
+            };
+        } catch (error: any) {
+            if (error.isCustom) throw error;
             throw new CustomError(
-                'Seat facility config not found',
-                ErrorCodes.NOT_FOUND
+                'Failed to update seat facility configuration',
+                ErrorCodes.INVALID_PARAMS
             );
         }
+    }
+);
 
-        if (key && key !== config.key) {
-            const exists = await SeatFacilityConfig.findOne({ where: { key } });
-            if (exists) {
+router.delete(
+    '/seat-facilities/:id',
+    authMiddleware,
+    adminMiddleware,
+    async (ctx) => {
+        try {
+            const id = Number(ctx.params.id);
+            const config = await SeatFacilityConfig.findByPk(id);
+            if (!config) {
                 throw new CustomError(
-                    'Facility key already exists',
-                    ErrorCodes.INVALID_PARAMS
+                    'Seat facility config not found',
+                    ErrorCodes.NOT_FOUND
                 );
             }
-        }
 
-        await config.update({
-            key: key ?? config.key,
-            label: label ?? config.label,
-            icon:
-                typeof icon !== 'undefined'
-                    ? normalizeIconValue(icon)
-                    : config.icon,
-            order: Number.isFinite(Number(order))
-                ? Number(order)
-                : config.order,
-            enabled: typeof enabled === 'boolean' ? enabled : config.enabled,
-            ...buildUpdatedBy(ctx),
-        });
+            await config.destroy();
 
-        ctx.body = {
-            success: true,
-            data: normalizeConfigResponseData(config),
-        };
-    } catch (error: any) {
-        if (error.isCustom) throw error;
-        throw new CustomError(
-            'Failed to update seat facility configuration',
-            ErrorCodes.INVALID_PARAMS
-        );
-    }
-});
-
-router.delete('/seat-facilities/:id', authMiddleware, async (ctx) => {
-    try {
-        const id = Number(ctx.params.id);
-        const config = await SeatFacilityConfig.findByPk(id);
-        if (!config) {
+            ctx.body = {
+                success: true,
+                message: 'Deleted successfully',
+            };
+        } catch (error: any) {
+            if (error.isCustom) throw error;
             throw new CustomError(
-                'Seat facility config not found',
-                ErrorCodes.NOT_FOUND
+                'Failed to delete seat facility configuration',
+                ErrorCodes.INVALID_PARAMS
             );
         }
-
-        await config.destroy();
-
-        ctx.body = {
-            success: true,
-            message: 'Deleted successfully',
-        };
-    } catch (error: any) {
-        if (error.isCustom) throw error;
-        throw new CustomError(
-            'Failed to delete seat facility configuration',
-            ErrorCodes.INVALID_PARAMS
-        );
     }
-});
+);
 
 export default router;

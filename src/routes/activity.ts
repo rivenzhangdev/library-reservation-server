@@ -224,7 +224,6 @@ router.post('/checkin/:id', authMiddleware, async (ctx) => {
  */
 router.post('/checkout/:id', authMiddleware, async (ctx) => {
     try {
-        ensureNotBlacklisted(ctx);
         const activityId = ctx.params.id;
         const userId = (ctx as any).state.user.id;
 

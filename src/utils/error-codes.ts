@@ -90,6 +90,7 @@ export const ErrorCodes = {
 
     // ==================== 反馈相关错误 (8000-8999) ====================
     FEEDBACK_NOT_FOUND: 8001, // 反馈不存在
+    FEEDBACK_ALREADY_RESOLVED: 8004, // 反馈已解决
     GET_FEEDBACKS_ERROR: 8002, // 获取反馈列表失败
     SUBMIT_FEEDBACK_ERROR: 8003, // 提交反馈失败
 
