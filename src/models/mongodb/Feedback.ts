@@ -59,6 +59,7 @@ const feedbackSchema = new Schema<IFeedback>(
         reply: String,
         remark: String,
         repliedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+        processedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         replyAt: Date,
         updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         processedAt: Date,
